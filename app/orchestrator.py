@@ -16,6 +16,7 @@ from app.services.summarizer import SummarizerService
 from app.services.scorer import ScorerService
 from app.services.deduplicator import DeduplicatorService
 from app.models.article import Article, ItemType
+from app.models.article_tag import ArticleTag
 from app.config.database import SessionLocal
 
 logger = logging.getLogger(__name__)
@@ -240,13 +241,24 @@ class CrawlerOrchestrator:
                     )
 
                     db.add(db_article)
+                    db.flush()  # Flush to get the article ID
+
+                    # Save tags to article_tags table if article has tags
+                    if article.tags:
+                        for tag in article.tags:
+                            tag_entry = ArticleTag(
+                                article_id=db_article.id,
+                                tag=tag
+                            )
+                            db.add(tag_entry)
+
                     saved_count += 1
 
                 except Exception as e:
                     logger.error(f"Failed to save article: {e}")
                     continue
 
-            # Commit all articles
+            # Commit all articles and tags
             db.commit()
             logger.info(f"Saved {saved_count} articles to database")
 
@@ -292,5 +304,81 @@ class CrawlerOrchestrator:
 
         stats["completed_at"] = datetime.utcnow().isoformat()
         logger.info(f"Deduplication completed. Removed: {stats['removed']}")
+
+        return stats
+
+    async def refresh_scores(self, days: int = 30) -> Dict[str, Any]:
+        """
+        Recalculate scores for articles from last N days
+
+        This updates scores to reflect time decay as articles age.
+
+        Args:
+            days: Number of days back to refresh scores (default: 30)
+
+        Returns:
+            Dictionary with refresh statistics
+        """
+        logger.info(f"Starting score refresh for articles from last {days} days...")
+
+        stats = {
+            "started_at": datetime.utcnow().isoformat(),
+            "updated": 0,
+            "success": False
+        }
+
+        db = SessionLocal()
+        try:
+            from datetime import timedelta
+
+            # Get articles from last N days
+            cutoff = datetime.utcnow() - timedelta(days=days)
+            articles = db.query(Article).filter(
+                Article.created_at_source >= cutoff
+            ).all()
+
+            logger.info(f"Found {len(articles)} articles to refresh")
+
+            # Recalculate each score
+            for article in articles:
+                try:
+                    # Convert DB Article to RawArticle for scoring
+                    raw_article = RawArticle(
+                        title_en=article.title_en,
+                        url=article.url,
+                        source=article.source,
+                        published_at=article.created_at_source,
+                        tags=[],  # Not needed for scoring
+                        content="",  # Not needed for scoring
+                        stars=article.stars,
+                        upvotes=article.upvotes,
+                        comments=article.comments,
+                        read_time=article.read_time,
+                        language=article.language
+                    )
+
+                    # Recalculate score with current time decay
+                    new_score = self.scorer.calculate_score(raw_article)
+                    article.score = new_score
+                    stats["updated"] += 1
+
+                except Exception as e:
+                    logger.warning(f"Failed to refresh score for article {article.id}: {e}")
+                    continue
+
+            # Commit all updates
+            db.commit()
+            stats["success"] = True
+
+        except Exception as e:
+            logger.error(f"Error during score refresh: {e}", exc_info=True)
+            stats["error"] = str(e)
+            db.rollback()
+
+        finally:
+            db.close()
+
+        stats["completed_at"] = datetime.utcnow().isoformat()
+        logger.info(f"Score refresh completed. Updated: {stats['updated']} articles")
 
         return stats
