@@ -54,7 +54,8 @@ async def root():
             "crawl_github": "POST /api/crawl/github",
             "crawl_llm": "POST /api/crawl/llm-rankings",
             "crawl_all": "POST /api/crawl/all",
-            "deduplicate": "POST /api/deduplicate"
+            "deduplicate": "POST /api/deduplicate",
+            "refresh_scores": "POST /api/refresh-scores?days=30"
         }
     }
 
@@ -248,6 +249,34 @@ async def deduplicate(background_tasks: BackgroundTasks):
     return {
         "status": "started",
         "message": "Deduplication started in background"
+    }
+
+
+@app.post("/api/refresh-scores")
+async def refresh_scores(background_tasks: BackgroundTasks, days: int = 30):
+    """
+    Recalculate scores for articles from last N days
+
+    This updates scores to reflect time decay as articles age.
+    Should be run daily via cron/scheduler.
+
+    Query params:
+        days: Number of days back to refresh (default: 30)
+    """
+    logger.info(f"Score refresh triggered for last {days} days")
+
+    async def run_refresh():
+        try:
+            stats = await orchestrator.refresh_scores(days=days)
+            last_stats["refresh_scores"] = stats
+            logger.info(f"Score refresh completed: {stats.get('updated', 0)} articles updated")
+        except Exception as e:
+            logger.error(f"Score refresh failed: {e}", exc_info=True)
+
+    background_tasks.add_task(run_refresh)
+    return {
+        "status": "started",
+        "message": f"Score refresh started in background for articles from last {days} days"
     }
 
 
