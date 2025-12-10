@@ -39,26 +39,26 @@ class LLMRankingsCrawler(BaseCrawler):
                 - "models": List of LLMModel objects
         """
         self.log_start()
-        creators_dict = {}  # Store creators by external_id to avoid duplicates
+        creators_dict = {}  #llm 제공사(OpenAI, Anthropic, ...) external_id로 저장
         models = []
 
         try:
-            # Fetch data from API
+            # api fetch
             api_data = await self._fetch_api_data()
 
             if not api_data or "models" not in api_data:
                 self.logger.warning("No models data received from API")
                 return {"creators": [], "models": []}
 
-            # Parse and transform data
+            # 반환받은 api data 파싱 및 변환
             for model_data in api_data["models"]:
                 try:
-                    # Extract model creator first
+                    # llm(model) 제공사 부터 파싱
                     creator = self._parse_model_creator(model_data.get("model_creator", {}))
                     if creator and creator.external_id:
                         creators_dict[creator.external_id] = creator
 
-                    # Parse model
+                    # llm(model) 파싱
                     model = self._parse_model(model_data, creator)
                     models.append(model)
                 except Exception as e:
@@ -85,7 +85,7 @@ class LLMRankingsCrawler(BaseCrawler):
         url = f"{self.API_BASE_URL}{self.API_ENDPOINT}"
 
         headers = {
-            "x-api-key": settings.ARTIFICIAL_ANALYSIS_API_KEY
+            "x-api-key": settings.ARTIFICIAL_ANALYSIS_API_KEY #https://artificialanalysis.ai에서 발급받은 api key
         }
 
         self.logger.info(f"Fetching LLM data from {url}")
@@ -95,18 +95,18 @@ class LLMRankingsCrawler(BaseCrawler):
             response.raise_for_status()
             data = response.json()
 
-        # Check for error in response
+        # 에러 여부 확인
         if isinstance(data, dict) and "error" in data:
             self.logger.error(f"API returned error: {data.get('error')}")
             return {}
 
-        # Extract models from 'data' key (API v2 structure)
+        # llm 모델 데이터 추출 (artificialanalysis.ai v2 api)
         if isinstance(data, dict) and "data" in data:
             models_data = data.get("data", [])
             self.logger.info(f"Received {len(models_data)} models from API")
-            return {"models": models_data}  # Wrap in expected structure
+            return {"models": models_data} 
 
-        # Fallback to old structure
+        # API 구조 변경시 Fallback 
         self.logger.info(f"Received {len(data.get('models', []))} models from API")
         return data
 
@@ -151,17 +151,14 @@ class LLMRankingsCrawler(BaseCrawler):
         Returns:
             LLMModel object
         """
-        # Extract API identifiers
         external_id = api_model.get("id")  # API UUID
         slug = api_model.get("slug")  # API slug
-        model_id = slug or external_id  # Use slug as model_id, fallback to external_id
+        model_id = slug or external_id  # slug를 model_id로 사용, fallback to external_id
 
-        # Extract model metadata
         model_name = api_model.get("name")
         provider = api_model.get("model_creator", {}).get("name", "Unknown")  # Legacy field
         description = api_model.get("description")
 
-        # Extract release date
         release_date_str = api_model.get("release_date")
         release_date = None
         if release_date_str:
@@ -170,50 +167,47 @@ class LLMRankingsCrawler(BaseCrawler):
             except ValueError:
                 self.logger.warning(f"Invalid release_date format: {release_date_str}")
 
-        # Debug logging
         self.logger.debug(
             f"Parsing model: id={model_id}, slug={slug}, release_date={release_date}, "
             f"creator={creator.slug if creator else 'None'}"
         )
 
-        # Extract pricing data (API v2 field names)
         pricing = api_model.get("pricing", {})
         price_input = self._to_decimal(pricing.get("price_1m_input_tokens"))
         price_output = self._to_decimal(pricing.get("price_1m_output_tokens"))
         price_blended = self._to_decimal(pricing.get("price_1m_blended_3_to_1"))
 
-        # Extract performance metrics (at root level in API v2)
         context_window = api_model.get("context_window")
         license_type = api_model.get("license")
         output_speed_median = self._to_decimal(api_model.get("median_output_tokens_per_second"))
         latency_ttft = self._to_decimal(api_model.get("median_time_to_first_token_seconds"))
         median_time_to_first_answer_token = self._to_decimal(api_model.get("median_time_to_first_answer_token"))
 
-        # Extract benchmark scores (using actual API v2 field names)
-        # ALL scores are converted from 0-1 to 0-100 percentages (or kept as-is if already 0-100)
+        # 각 llm 모델 별 벤치마크 점수 추출
+        # 모든 점수는 0.0~ 1.0에서 0-100 단위로 변환, 
         evaluations = api_model.get("evaluations", {})
 
-        # Agentic Capabilities (2)
+        # Agentic
         score_terminal_bench_hard = self._convert_to_percentage(evaluations.get("terminalbench_hard"))
         score_tau_bench_telecom = self._convert_to_percentage(evaluations.get("tau2"))
 
-        # Reasoning & Knowledge (4)
+        # Reasoning & Knowledge
         score_aa_lcr = self._convert_to_percentage(evaluations.get("lcr"))
         score_humanitys_last_exam = self._convert_to_percentage(evaluations.get("hle"))
-        score_mmlu_pro = self._convert_to_percentage(evaluations.get("mmlu_pro"))
+        score_mmlu_pro = self._convert_to_percentage(evaluations.get("mmlu_pro")) # 해당 밴치마크 v2에서 제공 x
         score_gpqa_diamond = self._convert_to_percentage(evaluations.get("gpqa"))
 
-        # Coding (2)
+        # Coding
         score_livecode_bench = self._convert_to_percentage(evaluations.get("livecodebench"))
         score_scicode = self._convert_to_percentage(evaluations.get("scicode"))
 
-        # Specialized Skills (4)
+        # Specialized
         score_ifbench = self._convert_to_percentage(evaluations.get("ifbench"))
         score_math_500 = self._convert_to_percentage(evaluations.get("math_500"))
         score_aime = self._convert_to_percentage(evaluations.get("aime"))
         score_aime_2025 = self._convert_to_percentage(evaluations.get("aime_25"))  # API uses "aime_25"
 
-        # Composite Indices (3) - these are already in 0-100 format, keep as-is
+        # Composite (artificialanalysis.ai에서 자체적으로 만든 밴치마크)
         score_aa_intelligence_index = self._to_decimal(
             evaluations.get("artificial_analysis_intelligence_index")
         )
@@ -224,29 +218,30 @@ class LLMRankingsCrawler(BaseCrawler):
             evaluations.get("artificial_analysis_math_index")
         )
 
-        # Create LLMModel object
+        # LLMModel object 생성
         model = LLMModel(
-            # API identifiers
+            
             external_id=external_id,
             slug=slug,
             model_id=model_id,
             model_name=model_name,
             release_date=release_date,
-            # Provider (legacy)
+
             provider=provider,
-            # Model creator will be set later by orchestrator using creator.id
+
             description=description,
-            # Pricing
+
             price_input=price_input,
             price_output=price_output,
             price_blended=price_blended,
-            # Performance
+
             context_window=context_window,
             output_speed_median=output_speed_median,
             latency_ttft=latency_ttft,
             median_time_to_first_answer_token=median_time_to_first_answer_token,
             license=license_type,
-            # Agentic Capabilities
+            
+            # Agentic
             score_terminal_bench_hard=score_terminal_bench_hard,
             score_tau_bench_telecom=score_tau_bench_telecom,
             # Reasoning & Knowledge
@@ -257,18 +252,18 @@ class LLMRankingsCrawler(BaseCrawler):
             # Coding
             score_livecode_bench=score_livecode_bench,
             score_scicode=score_scicode,
-            # Specialized Skills
+            # Specialized
             score_ifbench=score_ifbench,
             score_math_500=score_math_500,
             score_aime=score_aime,
             score_aime_2025=score_aime_2025,
-            # Composite Indices
+            # Composite 
             score_aa_intelligence_index=score_aa_intelligence_index,
             score_aa_coding_index=score_aa_coding_index,
             score_aa_math_index=score_aa_math_index,
         )
 
-        # Store creator external_id in a temporary attribute for later linking
+        # 제공사 external_id llm_model <-> llm_provider 연동위해
         if creator:
             model._creator_external_id = creator.external_id
 
@@ -312,11 +307,9 @@ class LLMRankingsCrawler(BaseCrawler):
         try:
             decimal_value = Decimal(str(value))
 
-            # If value is 0-1 range, convert to percentage
             if decimal_value <= 1:
                 return (decimal_value * 100).quantize(Decimal('0.01'))
 
-            # Already in 0-100 format
             return decimal_value.quantize(Decimal('0.01'))
 
         except (ValueError, TypeError):
@@ -346,25 +339,22 @@ class LLMRankingsCrawler(BaseCrawler):
         creators_saved = 0
         models_saved = 0
 
-        # Step 1: Save creators first (with upsert)
-        creator_id_map = {}  # Map external_id to database id
+        # Step 1: 제공사부터 저장 (with upsert)
+        creator_id_map = {}  # Map external_id : database id
 
         for creator in creators:
             try:
-                # Check if creator exists
                 existing = self.db.query(ModelCreator).filter(
                     ModelCreator.external_id == creator.external_id
                 ).first()
 
                 if existing:
-                    # Update existing creator
                     existing.slug = creator.slug
                     existing.name = creator.name
                     existing.updated_at = datetime.utcnow()
                     creator_id_map[creator.external_id] = existing.id
                     self.logger.info(f"Updated creator: {creator.slug}")
                 else:
-                    # Insert new creator
                     self.db.add(creator)
                     self.db.flush()  # Flush to get ID
                     creator_id_map[creator.external_id] = creator.id
@@ -376,7 +366,7 @@ class LLMRankingsCrawler(BaseCrawler):
                 self.logger.error(f"Failed to save creator {creator.slug}: {e}")
                 continue
 
-        # Commit creators
+        # llm_provider 커밋
         try:
             self.db.commit()
         except Exception as e:
@@ -384,10 +374,9 @@ class LLMRankingsCrawler(BaseCrawler):
             self.logger.error(f"Failed to commit creators to database: {e}")
             return {"creators": 0, "models": 0}
 
-        # Step 2: Save models (with upsert and link to creators)
+        # Step 2: llm_models 저장 (with upsert and link to creators)
         for model in models:
             try:
-                # Link model to creator
                 creator_external_id = getattr(model, '_creator_external_id', None)
                 if creator_external_id and creator_external_id in creator_id_map:
                     model.model_creator_id = creator_id_map[creator_external_id]
@@ -395,19 +384,17 @@ class LLMRankingsCrawler(BaseCrawler):
                         f"Linked model {model.model_id} to creator_id={model.model_creator_id}"
                     )
 
-                # Log model data before save
+                # 저장전 로그
                 self.logger.debug(
                     f"Model data: id={model.model_id}, slug={model.slug}, "
                     f"release_date={model.release_date}, model_creator_id={model.model_creator_id}"
                 )
 
-                # Check if model exists
                 existing = self.db.query(LLMModel).filter(
                     LLMModel.model_id == model.model_id
                 ).first()
 
                 if existing:
-                    # Update existing model - explicitly update key fields
                     existing.slug = model.slug
                     existing.external_id = model.external_id
                     existing.release_date = model.release_date
@@ -416,19 +403,16 @@ class LLMRankingsCrawler(BaseCrawler):
                     existing.provider = model.provider
                     existing.description = model.description
 
-                    # Update pricing
                     existing.price_input = model.price_input
                     existing.price_output = model.price_output
                     existing.price_blended = model.price_blended
 
-                    # Update performance
                     existing.context_window = model.context_window
                     existing.output_speed_median = model.output_speed_median
                     existing.latency_ttft = model.latency_ttft
                     existing.median_time_to_first_answer_token = model.median_time_to_first_answer_token
                     existing.license = model.license
 
-                    # Update all benchmark scores
                     existing.score_terminal_bench_hard = model.score_terminal_bench_hard
                     existing.score_tau_bench_telecom = model.score_tau_bench_telecom
                     existing.score_aa_lcr = model.score_aa_lcr
@@ -452,7 +436,6 @@ class LLMRankingsCrawler(BaseCrawler):
                         f"release_date={existing.release_date}, creator_id={existing.model_creator_id})"
                     )
                 else:
-                    # Insert new model (remove temporary attribute)
                     if hasattr(model, '_creator_external_id'):
                         delattr(model, '_creator_external_id')
                     self.db.add(model)
@@ -467,7 +450,7 @@ class LLMRankingsCrawler(BaseCrawler):
                 self.logger.error(f"Failed to save model {model.model_id}: {e}")
                 continue
 
-        # Commit models
+        # llm_model 커밋
         try:
             self.db.commit()
             self.logger.info(f"Successfully saved {creators_saved} creators and {models_saved} models")

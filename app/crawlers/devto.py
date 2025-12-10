@@ -25,12 +25,11 @@ class DevToCrawler(BaseCrawler):
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                # Fetch top articles from last 7 days
                 response = await client.get(
                     self.BASE_URL,
                     params={
                         "per_page": 50,
-                        "top": 7  # Top articles from last 7 days
+                        "top": 7  
                     },
                     headers={"User-Agent": self.user_agent}
                 )
@@ -46,7 +45,6 @@ class DevToCrawler(BaseCrawler):
                         self.logger.warning(f"Failed to parse article: {e}")
                         continue
 
-                # Add delay to be polite
                 await asyncio.sleep(self.delay)
 
         except httpx.HTTPError as e:

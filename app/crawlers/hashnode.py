@@ -70,7 +70,6 @@ class HashnodeCrawler(BaseCrawler):
                         self.logger.warning(f"Failed to parse article: {e}")
                         continue
 
-                # Add delay to be polite
                 await asyncio.sleep(self.delay)
 
         except httpx.HTTPError as e:

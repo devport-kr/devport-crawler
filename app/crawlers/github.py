@@ -38,13 +38,11 @@ class GitHubCrawler(BaseCrawler):
 
                 soup = BeautifulSoup(response.text, "html.parser")
 
-                # Find all trending repo items
                 repo_elements = soup.find_all("article", class_="Box-row")
                 self.logger.info(f"Found {len(repo_elements)} trending repositories")
 
                 for repo_element in repo_elements:
                     try:
-                        # Extract repo name and URL
                         repo_link = repo_element.find("h2").find("a")
                         if not repo_link:
                             continue
@@ -53,25 +51,20 @@ class GitHubCrawler(BaseCrawler):
                         repo_full_name = repo_path.strip("/")
                         repo_url = f"https://github.com{repo_path}"
 
-                        # Extract description
                         desc_element = repo_element.find("p")
                         description = desc_element.get_text(strip=True) if desc_element else ""
 
-                        # Extract language
                         lang_element = repo_element.find("span", {"itemprop": "programmingLanguage"})
                         language = lang_element.get_text(strip=True) if lang_element else None
 
-                        # Extract stars (total)
                         star_link = repo_element.find("a", href=lambda h: h and "/stargazers" in h)
                         stars_text = star_link.get_text(strip=True) if star_link else "0"
                         stars = self._parse_star_count(stars_text)
 
-                        # Extract forks
                         fork_link = repo_element.find("a", href=lambda h: h and "/forks" in h)
                         forks_text = fork_link.get_text(strip=True) if fork_link else "0"
                         forks = self._parse_star_count(forks_text)
 
-                        # Extract stars this week
                         stars_this_week_span = repo_element.find("span", class_="d-inline-block float-sm-right")
                         if stars_this_week_span:
                             stars_this_week_text = stars_this_week_span.get_text(strip=True).split()[0]
@@ -79,7 +72,6 @@ class GitHubCrawler(BaseCrawler):
                         else:
                             stars_this_week = 0
 
-                        # Create RawArticle
                         article = RawArticle(
                             title_en=repo_full_name,
                             url=repo_url,
@@ -128,7 +120,5 @@ class GitHubCrawler(BaseCrawler):
         Returns:
             True if article should be skipped
         """
-        # For trending, we don't filter by stars since they're already curated by GitHub
-        # But we can still apply the minimum if configured
         min_stars = settings.MIN_STARS_GITHUB
         return (article.stars or 0) < min_stars
