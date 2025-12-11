@@ -5,7 +5,8 @@ devport.kr 크롤링 서비스
 ## 기술 스택
 
 - **Python 3.11+**
-- **FastAPI** - API 프레임워크
+- **AWS Lambda** - 서버리스 실행 환경
+- **EventBridge Scheduler** - 스케줄링
 - **Google Gemini 2.5 Flash** - LLM 기반 요약/카테고리화
 - **SQLAlchemy** - ORM
 - **PostgreSQL** - 데이터베이스
@@ -45,6 +46,8 @@ devport.kr 크롤링 서비스
 
 ## 빠른 시작
 
+### 로컬 테스트
+
 ```bash
 # 의존성 설치
 pip install -r requirements.txt
@@ -53,21 +56,35 @@ pip install -r requirements.txt
 cp .env.example .env
 # .env 파일에서 GEMINI_API_KEY 설정 필요
 
-# 서버 실행
-uvicorn app.main:app --reload
-
-# 크롤링 테스트
-curl -X POST http://localhost:8000/api/crawl/devto
+# 핸들러 직접 실행 (로컬 테스트)
+python -m app.handler
 ```
 
-## API 엔드포인트
+### Lambda 배포
 
-- `POST /api/crawl/devto` - Dev.to 크롤링
-- `POST /api/crawl/hashnode` - Hashnode 크롤링
-- `POST /api/crawl/medium` - Medium 크롤링
-- `POST /api/crawl/github` - GitHub 크롤링
-- `GET /api/health` - 헬스 체크
-- `GET /api/stats` - 통계 조회
+```bash
+# Docker 이미지 빌드
+docker build -t devport-crawler .
+
+# ECR에 푸시 (AWS CLI 설정 필요)
+aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin <account-id>.dkr.ecr.us-east-1.amazonaws.com
+docker tag devport-crawler:latest <account-id>.dkr.ecr.us-east-1.amazonaws.com/devport-crawler:latest
+docker push <account-id>.dkr.ecr.us-east-1.amazonaws.com/devport-crawler:latest
+
+# Lambda 함수 업데이트
+aws lambda update-function-code --function-name devport-crawler --image-uri <account-id>.dkr.ecr.us-east-1.amazonaws.com/devport-crawler:latest
+```
+
+## Lambda 이벤트 페이로드
+
+Lambda는 EventBridge Scheduler에서 다음 이벤트를 받습니다:
+
+- `{"source": "github"}` - GitHub 트렌딩 크롤링
+- `{"source": "hashnode"}` - Hashnode 크롤링
+- `{"source": "medium"}` - Medium 크롤링
+- `{"source": "reddit"}` - Reddit 크롤링
+- `{"source": "llm_rankings"}` - LLM 랭킹 크롤링
+- `{"source": "all_blogs"}` - 모든 블로그 크롤링 (기본값)
 
 ## 환경 변수
 
