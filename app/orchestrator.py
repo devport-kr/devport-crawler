@@ -84,6 +84,111 @@ class CrawlerOrchestrator:
 
         return stats
 
+    async def run_hashnode_crawler(self) -> Dict[str, Any]:
+        """
+        Run Hashnode crawler
+
+        Returns:
+            Dictionary with crawling statistics
+        """
+        logger.info("Starting Hashnode crawler...")
+
+        stats = {
+            "started_at": datetime.utcnow().isoformat(),
+            "source": "hashnode",
+            "crawled": 0,
+            "saved": 0,
+            "success": False
+        }
+
+        try:
+            crawler = HashnodeCrawler()
+            articles = await crawler.crawl()
+            saved = await self._process_and_save_articles(articles)
+
+            stats["crawled"] = len(articles)
+            stats["saved"] = saved
+            stats["success"] = True
+
+        except Exception as e:
+            logger.error(f"Error crawling Hashnode: {e}", exc_info=True)
+            stats["error"] = str(e)
+
+        stats["completed_at"] = datetime.utcnow().isoformat()
+        logger.info(f"Hashnode crawler completed. Saved: {stats['saved']}")
+
+        return stats
+
+    async def run_medium_crawler(self) -> Dict[str, Any]:
+        """
+        Run Medium crawler
+
+        Returns:
+            Dictionary with crawling statistics
+        """
+        logger.info("Starting Medium crawler...")
+
+        stats = {
+            "started_at": datetime.utcnow().isoformat(),
+            "source": "medium",
+            "crawled": 0,
+            "saved": 0,
+            "success": False
+        }
+
+        try:
+            crawler = MediumCrawler()
+            articles = await crawler.crawl()
+            saved = await self._process_and_save_articles(articles)
+
+            stats["crawled"] = len(articles)
+            stats["saved"] = saved
+            stats["success"] = True
+
+        except Exception as e:
+            logger.error(f"Error crawling Medium: {e}", exc_info=True)
+            stats["error"] = str(e)
+
+        stats["completed_at"] = datetime.utcnow().isoformat()
+        logger.info(f"Medium crawler completed. Saved: {stats['saved']}")
+
+        return stats
+
+    async def run_reddit_crawler(self) -> Dict[str, Any]:
+        """
+        Run Reddit crawler
+
+        Returns:
+            Dictionary with crawling statistics
+        """
+        logger.info("Starting Reddit crawler...")
+
+        stats = {
+            "started_at": datetime.utcnow().isoformat(),
+            "source": "reddit",
+            "crawled": 0,
+            "saved": 0,
+            "success": False
+        }
+
+        try:
+            crawler = RedditCrawler()
+            articles = await crawler.crawl()
+            saved = await self._process_and_save_articles(articles)
+
+            stats["crawled"] = len(articles)
+            stats["saved"] = saved
+            stats["success"] = True
+
+        except Exception as e:
+            logger.error(f"Error crawling Reddit: {e}", exc_info=True)
+            stats["error"] = str(e)
+
+        stats["completed_at"] = datetime.utcnow().isoformat()
+        logger.info(f"Reddit crawler completed. Saved: {stats['saved']}")
+
+        return stats
+
     async def run_github_crawler(self) -> Dict[str, Any]:
         """
         Run GitHub trending crawler
