@@ -52,8 +52,10 @@ async def root():
             "crawl_hashnode": "POST /api/crawl/hashnode",
             "crawl_medium": "POST /api/crawl/medium",
             "crawl_reddit": "POST /api/crawl/reddit",
+            "crawl_hackernews": "POST /api/crawl/hackernews",
             "crawl_github": "POST /api/crawl/github",
             "crawl_llm": "POST /api/crawl/llm-rankings",
+            "crawl_llm_media": "POST /api/crawl/llm-media",
             "crawl_all": "POST /api/crawl/all",
             "deduplicate": "POST /api/deduplicate",
             "refresh_scores": "POST /api/refresh-scores (HTTP) or {\"source\": \"refresh_scores\"} (Lambda)"
@@ -166,6 +168,27 @@ async def crawl_reddit(background_tasks: BackgroundTasks):
     }
 
 
+@app.post("/api/crawl/hackernews")
+async def crawl_hackernews(background_tasks: BackgroundTasks):
+    """Trigger Hacker News crawling"""
+    logger.info("Hacker News crawl triggered")
+
+    async def run_crawler():
+        try:
+            stats = await orchestrator.run_hackernews_crawler()
+            last_stats["hackernews"] = stats
+            logger.info(f"Hacker News crawler completed: {stats.get('saved', 0)} articles saved")
+        except Exception as e:
+            logger.error(f"Hacker News crawler failed: {e}", exc_info=True)
+
+    background_tasks.add_task(run_crawler)
+    return {
+        "status": "started",
+        "source": "hackernews",
+        "message": "Hacker News crawler started in background"
+    }
+
+
 @app.post("/api/crawl/github")
 async def crawl_github(background_tasks: BackgroundTasks):
     """Trigger GitHub trending crawling"""
@@ -205,6 +228,27 @@ async def crawl_llm_rankings(background_tasks: BackgroundTasks):
         "status": "started",
         "source": "llm_rankings",
         "message": "LLM rankings crawler started in background"
+    }
+
+
+@app.post("/api/crawl/llm-media")
+async def crawl_llm_media(background_tasks: BackgroundTasks):
+    """Trigger LLM media rankings crawling"""
+    logger.info("LLM media rankings crawl triggered")
+
+    async def run_crawler():
+        try:
+            stats = await orchestrator.run_llm_media_crawler()
+            last_stats["llm_media_rankings"] = stats
+            logger.info("LLM media crawler completed")
+        except Exception as e:
+            logger.error(f"LLM media crawler failed: {e}", exc_info=True)
+
+    background_tasks.add_task(run_crawler)
+    return {
+        "status": "started",
+        "source": "llm_media_rankings",
+        "message": "LLM media rankings crawler started in background"
     }
 
 

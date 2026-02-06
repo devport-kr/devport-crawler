@@ -20,12 +20,17 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
     LLM_PROVIDER: str = "openai"  # "openai", "anthropic", or "gemini"
+    LLM_MAX_TOKENS: int = 8000  # Max completion tokens (output) per request
 
     # GitHub API
     GITHUB_TOKEN: Optional[str] = None
 
     # Artificial Analysis API (for LLM rankings)
     ARTIFICIAL_ANALYSIS_API_KEY: Optional[str] = None
+
+    # LLM Media Benchmarks (Artificial Analysis)
+    # Uses the same API key; kept for clarity and future overrides
+    ARTIFICIAL_ANALYSIS_MEDIA_API_KEY: Optional[str] = None
 
     # Crawling settings
     CRAWL_DELAY_SECONDS: int = 2
@@ -53,7 +58,12 @@ class Settings(BaseSettings):
     MIN_REACTIONS_DEVTO: int = 10
     MIN_REACTIONS_HASHNODE: int = 5
     MIN_UPVOTES_REDDIT: int = 100
+    MIN_SCORE_HACKERNEWS: int = 50
     MIN_STARS_GITHUB: int = 50
+
+    # Hacker News settings
+    MAX_STORIES_HACKERNEWS: int = 100  # Number of top stories to fetch
+    MAX_AGE_DAYS_HACKERNEWS: int = 7  # Skip stories older than this
 
     # Reddit API (optional OAuth; falls back to public if missing)
     REDDIT_CLIENT_ID: Optional[str] = None

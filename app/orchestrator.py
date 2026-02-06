@@ -10,8 +10,10 @@ from app.crawlers.devto import DevToCrawler
 from app.crawlers.hashnode import HashnodeCrawler
 from app.crawlers.medium import MediumCrawler
 from app.crawlers.reddit import RedditCrawler
+from app.crawlers.hackernews import HackerNewsCrawler
 from app.crawlers.github import GitHubCrawler
 from app.crawlers.llm_rankings import LLMRankingsCrawler
+from app.crawlers.llm_media_rankings import LLMMediaRankingsCrawler
 from app.crawlers.base import RawArticle
 from app.services.summarizer import SummarizerService
 from app.services.scorer import ScorerService
@@ -53,7 +55,8 @@ class CrawlerOrchestrator:
             ("devto", DevToCrawler()),
             ("hashnode", HashnodeCrawler()),
             ("medium", MediumCrawler()),
-            ("reddit", RedditCrawler())
+            ("reddit", RedditCrawler()),
+            ("hackernews", HackerNewsCrawler())
         ]
 
         for source_name, crawler in sources:
@@ -178,6 +181,70 @@ class CrawlerOrchestrator:
 
         stats["completed_at"] = datetime.utcnow().isoformat()
 
+        return stats
+
+    async def run_llm_media_crawler(self) -> Dict[str, Any]:
+        """
+        Run LLM media rankings crawler using Artificial Analysis API
+
+        Fetches media model data for:
+        - text-to-image
+        - image-editing
+        - text-to-speech
+        - text-to-video
+        - image-to-video
+
+        Upserts model creators and media models with categories where available.
+        """
+        logger.info("Starting LLM media rankings crawler...")
+
+        stats = {
+            "started_at": datetime.utcnow().isoformat(),
+            "source": "llm_media_rankings",
+            "creators_crawled": 0,
+            "creators_saved": 0,
+            "media": {},
+            "success": False,
+        }
+
+        db = SessionLocal()
+
+        try:
+            crawler = LLMMediaRankingsCrawler(db=db)
+            data = await crawler.crawl()
+            creators = data.get("creators", [])
+            media = data.get("media", {})
+
+            stats["creators_crawled"] = len(creators)
+            stats["media"] = {k: {"crawled": len(v)} for k, v in media.items()}
+
+            save_result = await crawler.save_data(data)
+            stats["creators_saved"] = save_result.get("creators", {}).get("saved", 0)
+
+            for media_type, result in save_result.items():
+                if media_type == "creators":
+                    continue
+                stats["media"].setdefault(media_type, {})
+                stats["media"][media_type].update({
+                    "saved": result.get("saved", 0),
+                    "categories_saved": result.get("categories_saved", 0),
+                })
+
+            stats["success"] = True
+
+            logger.info(
+                "LLM media crawler completed: %s creators saved, media types: %s",
+                stats["creators_saved"],
+                ", ".join(stats["media"].keys()),
+            )
+
+        except Exception as e:
+            logger.error(f"Error crawling LLM media rankings: {e}", exc_info=True)
+            stats["error"] = str(e)
+        finally:
+            db.close()
+
+        stats["completed_at"] = datetime.utcnow().isoformat()
         return stats
 
     async def run_devto_crawler(self) -> Dict[str, Any]:
@@ -320,6 +387,41 @@ class CrawlerOrchestrator:
 
         return stats
 
+    async def run_hackernews_crawler(self) -> Dict[str, Any]:
+        """
+        Run Hacker News crawler
+
+        Returns:
+            Dictionary with crawling statistics
+        """
+        logger.info("Starting Hacker News crawler...")
+
+        stats = {
+            "started_at": datetime.utcnow().isoformat(),
+            "source": "hackernews",
+            "crawled": 0,
+            "saved": 0,
+            "success": False
+        }
+
+        try:
+            crawler = HackerNewsCrawler()
+            articles = await crawler.crawl()
+            saved = await self._process_and_save_articles(articles)
+
+            stats["crawled"] = len(articles)
+            stats["saved"] = saved
+            stats["success"] = True
+
+        except Exception as e:
+            logger.error(f"Error crawling Hacker News: {e}", exc_info=True)
+            stats["error"] = str(e)
+
+        stats["completed_at"] = datetime.utcnow().isoformat()
+        logger.info(f"Hacker News crawler completed. Saved: {stats['saved']}")
+
+        return stats
+
     async def _process_and_save_articles(self, articles: List[RawArticle]) -> int:
         """
         Process raw articles through the pipeline and save to database
@@ -357,13 +459,20 @@ class CrawlerOrchestrator:
             summaries = await self.summarizer.summarize_batch(unique_articles)
             logger.info("Summarization and categorization completed")
 
-            # Step 3: Filter out failed summarizations and calculate scores
+            # Step 3: Filter out failed summarizations, non-technical articles, and calculate scores
             scored_articles = []
             failed_count = 0
+            non_technical_count = 0
             for article, summary in zip(unique_articles, summaries):
                 if summary is None:
                     failed_count += 1
                     logger.warning(f"Skipping article due to failed summarization: {article.title_en}")
+                    continue
+
+                # Skip non-developer-relevant articles (politics, consumer news, etc.)
+                if not summary.get("is_technical", False):
+                    non_technical_count += 1
+                    logger.info(f"Skipping non-developer-relevant article: {article.title_en}")
                     continue
 
                 # Get category from LLM response
@@ -371,14 +480,19 @@ class CrawlerOrchestrator:
                 score = self.scorer.calculate_score(article)
                 scored_articles.append((article, category, summary, score))
 
-            logger.info(f"Scoring completed. {failed_count} articles skipped due to failed summarization")
+            logger.info(f"Scoring completed. {failed_count} failed summarizations, {non_technical_count} non-developer-relevant articles skipped")
 
             # Step 5: Save to database
             saved_count = 0
             for article, category, summary, score in scored_articles:
                 try:
                     # Determine item type
-                    item_type = ItemType.REPO if article.source == "github" else ItemType.BLOG
+                    if article.source == "github":
+                        item_type = ItemType.REPO
+                    elif article.source in ["reddit", "hackernews"]:
+                        item_type = ItemType.DISCUSSION
+                    else:
+                        item_type = ItemType.BLOG
 
                     # Prefer tags from LLM; fallback to article tags
                     tags = summary.get("tags") if summary else None
@@ -479,13 +593,20 @@ class CrawlerOrchestrator:
             summaries = await self.summarizer.summarize_batch(unique_repos)
             logger.info("Summarization and categorization completed")
 
-            # Step 3: Filter out failed summarizations and calculate scores
+            # Step 3: Filter out failed summarizations, non-technical repos, and calculate scores
             scored_repos = []
             failed_count = 0
+            non_technical_count = 0
             for repo, summary in zip(unique_repos, summaries):
                 if summary is None:
                     failed_count += 1
                     logger.warning(f"Skipping repo due to failed summarization: {repo.title_en}")
+                    continue
+
+                # Skip non-developer-relevant repos
+                if not summary.get("is_technical", False):
+                    non_technical_count += 1
+                    logger.info(f"Skipping non-developer-relevant repo: {repo.title_en}")
                     continue
 
                 # Get category from LLM response
@@ -493,7 +614,7 @@ class CrawlerOrchestrator:
                 score = self.scorer.calculate_score(repo)
                 scored_repos.append((repo, category, summary, score))
 
-            logger.info(f"Scoring completed. {failed_count} repos skipped due to failed summarization")
+            logger.info(f"Scoring completed. {failed_count} failed summarizations, {non_technical_count} non-developer-relevant repos skipped")
 
             # Step 4: Save to git_repos table
             saved_count = 0
