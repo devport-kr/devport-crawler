@@ -5,6 +5,7 @@ import logging
 from typing import List
 from datetime import datetime, timedelta
 import httpx
+from bs4 import BeautifulSoup
 
 from app.crawlers.base import BaseCrawler, RawArticle
 from app.config.settings import settings
@@ -71,7 +72,7 @@ class HackerNewsCrawler(BaseCrawler):
             return []
 
     async def _fetch_story(self, client: httpx.AsyncClient, story_id: int) -> RawArticle:
-        """Fetch individual story details"""
+        """Fetch individual story details and article content"""
         response = await client.get(f"{self.BASE_URL}/item/{story_id}.json")
         response.raise_for_status()
         story = response.json()
@@ -79,18 +80,28 @@ class HackerNewsCrawler(BaseCrawler):
         if not story:
             raise ValueError(f"Story {story_id} not found")
 
-        # Convert to RawArticle
         original_url = story.get("url", "")
         discussion_url = self.HN_ITEM_URL.format(story_id)
 
+        # Fetch the actual article content from the linked URL
+        content = ""
+        if original_url and "news.ycombinator.com" not in original_url:
+            content = await self.fetch_url_content(client, original_url, self.user_agent)
+
+        # For Ask HN / Show HN without external URL, use the HN post text if available
+        if not content and story.get("text"):
+            soup = BeautifulSoup(story["text"], "lxml")
+            content = soup.get_text(separator="\n", strip=True)
+
         article = RawArticle(
             title_en=story.get("title", ""),
-            url=original_url or discussion_url,  # Prefer original source URL
+            url=original_url or discussion_url,
             source="hackernews",
             published_at=datetime.fromtimestamp(story.get("time", 0)),
             external_id=str(story_id),
+            content=content,
             upvotes=story.get("score", 0),
-            comments=story.get("descendants", 0),  # Total comment count
+            comments=story.get("descendants", 0),
             language="en",
             raw_data={
                 "hn_id": story_id,
@@ -98,7 +109,7 @@ class HackerNewsCrawler(BaseCrawler):
                 "original_url": original_url,
                 "hn_discussion_url": discussion_url,
                 "story_type": story.get("type", "story"),
-                "item_type": "DISCUSSION",  # Store as metadata
+                "item_type": "DISCUSSION",
             }
         )
 

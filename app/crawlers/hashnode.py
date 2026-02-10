@@ -29,6 +29,9 @@ class HashnodeCrawler(BaseCrawler):
               name
             }
             brief
+            content {
+              markdown
+            }
           }
         }
       }
@@ -90,13 +93,17 @@ class HashnodeCrawler(BaseCrawler):
 
         read_time = node.get("readTimeInMinutes", 0)
 
+        # Prefer full markdown content, fall back to brief
+        content_obj = node.get("content") or {}
+        content = content_obj.get("markdown") or node.get("brief", "")
+
         return RawArticle(
             title_en=node["title"],
             url=node["url"],
             source="hashnode",
             published_at=published_at,
             tags=tags,
-            content=node.get("brief", ""),
+            content=content,
             upvotes=node.get("reactionCount", 0),
             comments=node.get("responseCount", 0),
             read_time=f"{read_time} min read" if read_time else None,

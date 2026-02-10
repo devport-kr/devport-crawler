@@ -2,12 +2,16 @@
 
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from typing import Dict, Any
 import asyncio
 import logging
+from datetime import datetime
 
 from app.config.settings import settings
 from app.orchestrator import CrawlerOrchestrator
+from app.crawlers.base import RawArticle
+from app.services.summarizer import SummarizerService
 
 # Configure logging
 logging.basicConfig(
@@ -33,9 +37,16 @@ app.add_middleware(
 
 # Global orchestrator instance
 orchestrator = CrawlerOrchestrator()
+summarizer = SummarizerService()
 
 # Store last run stats (in-memory, for simple deployment)
 last_stats = {}
+
+
+class SummarizeRequest(BaseModel):
+    url: str
+    title: str
+    content: str
 
 
 @app.get("/")
@@ -58,7 +69,8 @@ async def root():
             "crawl_llm_media": "POST /api/crawl/llm-media",
             "crawl_all": "POST /api/crawl/all",
             "deduplicate": "POST /api/deduplicate",
-            "refresh_scores": "POST /api/refresh-scores (HTTP) or {\"source\": \"refresh_scores\"} (Lambda)"
+            "refresh_scores": "POST /api/refresh-scores (HTTP) or {\"source\": \"refresh_scores\"} (Lambda)",
+            "summarize": "POST /api/summarize"
         }
     }
 
@@ -320,6 +332,43 @@ async def refresh_scores(background_tasks: BackgroundTasks, days: int = None):
     return {
         "status": "started",
         "message": f"Score refresh started in background for articles from last {days} days"
+    }
+
+
+@app.post("/api/summarize")
+async def summarize_article(request: SummarizeRequest):
+    """
+    Summarize a single article given its URL and full content.
+
+    Returns Korean title, summary, category, and tags via LLM.
+    """
+    logger.info(f"Summarize request for: {request.url}")
+
+    raw_article = RawArticle(
+        title_en=request.title,
+        url=request.url,
+        source="manual",
+        published_at=datetime.utcnow(),
+        content=request.content,
+    )
+
+    try:
+        results = await summarizer.summarize_batch([raw_article], batch_size=1, delay=0, max_tokens_override=128000)
+    except Exception as e:
+        logger.error(f"Summarization failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Summarization failed: {str(e)}")
+
+    result = results[0] if results else None
+    if result is None:
+        raise HTTPException(status_code=500, detail="LLM summarization returned no result")
+
+    return {
+        "url": request.url,
+        "is_technical": result.get("is_technical", False),
+        "title_ko": result.get("title_ko", ""),
+        "summary_ko": result.get("summary_ko", ""),
+        "category": result.get("category", "OTHER"),
+        "tags": result.get("tags", []),
     }
 
 

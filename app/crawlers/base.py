@@ -4,6 +4,9 @@ from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import logging
+import re
+import httpx
+from bs4 import BeautifulSoup
 from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -95,3 +98,67 @@ class BaseCrawler(ABC):
     def log_error(self, error: Exception):
         """Log error"""
         self.logger.error(f"Error in {self.__class__.__name__}: {str(error)}", exc_info=True)
+
+    @staticmethod
+    async def fetch_url_content(
+        client: httpx.AsyncClient,
+        url: str,
+        user_agent: str = None,
+        max_chars: int = 15000,
+    ) -> str:
+        """
+        Fetch and extract readable text from an article URL.
+
+        Uses BeautifulSoup to extract main content from HTML pages.
+        Returns empty string on any failure (non-blocking).
+
+        Args:
+            client: httpx async client to use
+            url: article URL to fetch
+            user_agent: User-Agent header value
+            max_chars: max characters to return (truncates beyond this)
+        """
+        if not url:
+            return ""
+
+        try:
+            headers = {}
+            if user_agent:
+                headers["User-Agent"] = user_agent
+
+            response = await client.get(
+                url,
+                follow_redirects=True,
+                headers=headers,
+                timeout=15.0,
+            )
+            response.raise_for_status()
+
+            content_type = response.headers.get("content-type", "")
+            if "text/html" not in content_type:
+                return ""
+
+            soup = BeautifulSoup(response.text, "lxml")
+
+            # Remove non-content elements
+            for tag in soup(["script", "style", "nav", "header", "footer", "aside",
+                             "iframe", "noscript", "form", "button", "svg"]):
+                tag.decompose()
+
+            # Try <article> first, then <main>, then <body>
+            main = soup.find("article") or soup.find("main") or soup.find("body")
+            if not main:
+                return ""
+
+            text = main.get_text(separator="\n", strip=True)
+            # Collapse excessive blank lines
+            text = re.sub(r"\n{3,}", "\n\n", text)
+
+            if len(text) > max_chars:
+                text = text[:max_chars] + "\n\n[Content truncated]"
+
+            return text
+
+        except Exception as e:
+            logger.debug(f"Failed to fetch content from {url}: {e}")
+            return ""

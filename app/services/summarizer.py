@@ -21,6 +21,29 @@ class LLMQuotaExceeded(Exception):
 class SummarizerService:
     """Service to generate Korean summaries using LLM APIs"""
 
+    SYSTEM_MESSAGE = (
+        "You are an expert English-to-Korean technical translator and editor "
+        "specializing in software engineering content.\n\n"
+        "## Your Task\n"
+        "You produce **comprehensive Korean translations** of English tech articles. "
+        "This is a TRANSLATION that is slightly condensed — NOT a summary or abstract. "
+        "The Korean output should be approximately 70-80% of the original article's length. "
+        "A Korean reader should fully understand the article without needing to read the original.\n\n"
+        "## Korean Writing Rules\n"
+        "- Write natural, fluent Korean as if the author originally wrote in Korean. "
+        "Avoid literal translation patterns (e.g., '~하는 것이다', '~되어진다', '~할 수 있습니다' repetition).\n"
+        "- Use industry-standard Korean terms (e.g., 'deployment'→'배포', 'scalability'→'확장성').\n"
+        "- Keep proper nouns in English (React, Kubernetes, AWS, PostgreSQL, Kafka, etc.).\n"
+        "- Preserve the original author's tone and voice: formal→formal, casual→casual, opinionated→opinionated.\n"
+        "- Do NOT translate code blocks — include them exactly as-is.\n"
+        "- Use markdown formatting (##, ###, -, **, `) to mirror the original structure.\n\n"
+        "## Critical: Length and Detail\n"
+        "- LONGER output is ALWAYS better than missing content. Never cut for brevity.\n"
+        "- Include EVERY key argument, technical detail, example, and insight from the original.\n"
+        "- Preserve the article's section structure, heading hierarchy, and logical flow.\n"
+        "- Only trim genuinely redundant phrasing — never skip entire paragraphs or sections."
+    )
+
     def __init__(self):
         self.provider = settings.LLM_PROVIDER
         self.max_tokens = self._resolve_max_tokens()
@@ -49,258 +72,100 @@ class SummarizerService:
             requested = 8000
 
         if self.provider == "openai":
-            hard_cap = 16384  # gpt-4o-mini max completion tokens
+            hard_cap = 128000  # gpt-5-mini max completion tokens
             if requested > hard_cap:
                 logger.warning(
-                    f"LLM_MAX_TOKENS={requested} exceeds gpt-4o-mini limit {hard_cap}; clamping"
+                    f"LLM_MAX_TOKENS={requested} exceeds gpt-5-mini limit {hard_cap}; clamping"
                 )
             return min(requested, hard_cap)
 
         return requested
 
-    async def summarize(self, article: RawArticle) -> Dict[str, str]:
-        """
-        Generate Korean summary and categorization for an article
-
-        Args:
-            article: RawArticle to summarize
-
-        Returns:
-            Dictionary with 'title_ko', 'summary_ko', and 'category' keys, or None if failed
-        """
-        try:
-            if self.provider == "openai":
-                return await self._summarize_openai(article)
-            elif self.provider == "anthropic":
-                return await self._summarize_anthropic(article)
-            elif self.provider == "gemini":
-                return await self._summarize_gemini(article)
-        except Exception as e:
-            logger.error(f"Failed to summarize article: {e}")
-            # Return None to indicate failure - don't save articles without proper summarization
-            return None
-
-    async def _summarize_openai(self, article: RawArticle) -> Dict[str, str]:
-        """Generate summary using OpenAI GPT"""
-        prompt = self._build_prompt(article)
-
-        response = await self.openai_client.chat.completions.create(
-            model="gpt-4o-mini",  # Use mini for cost savings
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant that summarizes developer content in Korean."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=0.3,
-            max_tokens=self.max_tokens  # Max completion tokens (configurable)
-        )
-
-        content = response.choices[0].message.content
-        return self._parse_response(content)
-
-    async def _summarize_anthropic(self, article: RawArticle) -> Dict[str, str]:
-        """Generate summary using Anthropic Claude"""
-        prompt = self._build_prompt(article)
-
-        response = await self.anthropic_client.messages.create(
-            model="claude-3-5-haiku-20241022",  # Use Haiku for cost savings
-            max_tokens=self.max_tokens,  # Max completion tokens (configurable)
-            temperature=0.3,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ]
-        )
-
-        content = response.content[0].text
-        return self._parse_response(content)
-
-    async def _summarize_gemini(self, article: RawArticle) -> Dict[str, str]:
-        """Generate summary using Google Gemini"""
-        prompt = self._build_prompt(article)
-
-        # Gemini API is sync, so we need to run it in executor
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: self.gemini_model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.3,
-                    max_output_tokens=self.max_tokens,  # Max completion tokens (configurable)
-                )
-            )
-        )
-
-        content = response.text
-        return self._parse_response(content)
-
     def _build_batch_prompt(self, articles: list[RawArticle]) -> str:
         """Build prompt for multiple articles at once"""
         articles_text = ""
         for i, article in enumerate(articles, 1):
-            # Use FULL content without truncation
-            # Quality over speed - this is background processing
-            full_content = article.content or ""
-            articles_text += f"""
-        Article {i}:
-        Title: {article.title_en}
-        URL: {article.url}
-        Tags: {', '.join(article.tags[:10])}
-        Content: {full_content}
+            content = (article.content or "").strip()
+            tags_str = ', '.join(article.tags[:10]) if article.tags else '(none)'
 
-        """
+            articles_text += (
+                f"--- Article {i} ---\n"
+                f"Title: {article.title_en}\n"
+                f"URL: {article.url}\n"
+                f"Tags: {tags_str}\n"
+            )
+            if content:
+                articles_text += f"Content:\n{content}\n"
+            else:
+                articles_text += "Content: (not available)\n"
+            articles_text += "\n"
 
-            prompt = f"""Summarize and categorize these {len(articles)} developer articles in Korean.
+        prompt = f"""Translate the following {len(articles)} English developer article(s) into comprehensive Korean.
 
-        You have access to the FULL CONTENT of each article. Read carefully and provide comprehensive summaries.
+## Articles
 
-        {articles_text}
+{articles_text}
 
-        For EACH article, provide a JSON object with:
-        1. "url": The article URL (to match it back)
-        2. "is_technical": Boolean - Is this article relevant for developers/engineers?
-            - TRUE if:
-              * Technical content: tutorials, how-to guides, code examples, architecture, APIs,
-                databases, algorithms, system design, best practices, performance, debugging, testing
-              * Tech opinions: thoughts on frameworks, languages, tools, methodologies, industry practices
-              * Tech products/tools: new dev tools, frameworks, libraries, platforms, services
-              * Tech startups: companies building developer tools, infrastructure, SaaS for devs
-              * Developer experience: career advice, learning resources, productivity tools
-            - FALSE if:
-              * Pure political news (government surveillance, regulations not affecting devs directly)
-              * Non-tech business (general layoffs, funding for non-tech products)
-              * Consumer products (iPhone reviews, gadgets unless dev-related)
-              * Social issues without tech focus (diversity initiatives, workplace culture)
-              * Industry drama without technical merit
-            - KEY: Ask "Would a developer building software find this useful or interesting?"
-            - Examples of FALSE: "DHS tracks citizen who criticized them" (politics, not dev-related),
-              "General tech company layoffs" (unless about specific dev tools company)
-            - Examples of TRUE: "Why I switched from React to Vue", "Startup launches new API testing tool",
-              "The future of serverless", "Y Combinator-backed dev tools startup raises $5M"
-        3. "title_ko": A concise Korean title (max 100 characters) that captures the main topic
-        4. "summary_ko": A COMPREHENSIVE Korean summary in MARKDOWN format that:
-            - Summarizes the ENTIRE article, not just the introduction
-            - Explains the main concepts, techniques, and key takeaways
-            - Uses markdown formatting (##, ###, -, **, `, etc.) for better readability
-            - Can be as long as needed to fully explain the content (no length limit)
-            - Should be detailed enough that readers understand the article without reading the original
-            - Include code examples or technical details if present in the original
-            - Structure fidelity: Preserve the original section order and hierarchy.
-            - Headings: If the article has headings/subtitles, reproduce them in the summary in the same order and level (e.g., ##, ###).
-            - Heading text: Keep heading titles as close to the original as possible. If you translate, keep the meaning and structure intact.
-            - No re-structuring: Do not regroup or reorder content; follow the article's flow.
-        5. "category": One of these categories based on the PRIMARY topic:
-        - AI_LLM, DEVOPS_SRE, INFRA_CLOUD, DATABASE, BLOCKCHAIN, SECURITY,
-        - DATA_SCIENCE, ARCHITECTURE, MOBILE, FRONTEND, BACKEND, OTHER
-        6. "tags": 3-5 short, relevant tags (lowercase, no spaces; use hyphens if needed)
+## Instructions
 
-        Return a JSON array with {len(articles)} objects in the SAME ORDER as the articles above.
+For each article, produce a JSON object with these 6 fields:
 
-        Response format (MUST be valid JSON):
-        [
-        {{
-            "url": "...",
-            "is_technical": true,
-            "title_ko": "...",
-            "summary_ko": "## 개요\\n\\n이 글은 Python의 \\"equals\\" 연산자에 대해...\\n\\n### 주요 내용\\n\\n- 첫 번째 포인트\\n- 두 번째 포인트",
-            "category": "AI_LLM",
-            "tags": ["ai", "ml"]
-        }},
-        {{
-            "url": "...",
-            "is_technical": false,
-            "title_ko": "...",
-            "summary_ko": "정치 뉴스입니다...",
-            "category": "OTHER",
-            "tags": ["politics", "news"]
-        }}
-        ]
+### 1. is_technical (boolean)
+Is this article useful or interesting for software developers?
+- TRUE: tutorials, code, architecture, dev tools, frameworks, system design, security, infra, AI/ML, developer career, tech startup products
+- FALSE: pure politics, non-tech business, consumer product reviews, social issues unrelated to tech
+- Ask yourself: "Would a developer building software care about this?"
 
-        IMPORTANT:
-        - All newlines in summary_ko MUST be \\n (two characters: backslash + n)
-        - All quotes in summary_ko MUST be \\" (backslash + quote)
-        - Return ONLY the JSON array, no other text
+### 2. title_ko (string, max 100 characters)
+A concise Korean title capturing the core topic.
 
-        NOTE: Use is_technical to filter out non-developer content (politics, consumer news, etc.)
-              but keep tech opinions, startup news, and developer-relevant discussions.
+### 3. summary_ko (string, markdown format)
+Write a **comprehensive Korean translation** of the full article. This is a faithful translation that is slightly condensed — NOT a summary, NOT an abstract, NOT a brief overview.
 
-        CRITICAL - JSON Formatting:
-        - Properly escape all special characters in strings
-        - Use \\n for newlines (not literal newlines)
-        - Use \\" for quotes inside strings
-        - Use \\\\ for backslashes
-        - Ensure valid JSON array format"""
-        return prompt
+**Length target: aim for 70-80% of the original article's length.** Longer output is always better than missing content.
 
-    def _build_prompt(self, article: RawArticle) -> str:
-        """Build the prompt for single article (legacy, keeping for compatibility)"""
-        # Use FULL content without truncation
-        full_content = article.content or ""
+Requirements:
+- Translate EVERY section of the article — do NOT skip or merge sections
+- Preserve the original section structure, heading hierarchy (##, ###), and logical flow
+- Include ALL key arguments, explanations, technical details, examples, and insights
+- Include code examples from the original exactly as-is (do not translate code)
+- Follow the author's original flow and order — do NOT reorder or restructure
+- Preserve the author's tone and voice (if opinionated, keep the opinion; if humorous, keep the humor)
+- A Korean reader must be able to fully understand the article without reading the English original
+- Only trim genuinely redundant or repetitive phrasing — NEVER skip entire paragraphs or ideas
+- If content is unavailable (title only), write a brief description based on the title. Do NOT fabricate details.
 
-        prompt = f"""Summarize and categorize this developer article in Korean.
+### 4. category (string)
+Pick the single best match: AI_LLM, DEVOPS_SRE, INFRA_CLOUD, DATABASE, BLOCKCHAIN, SECURITY, DATA_SCIENCE, ARCHITECTURE, MOBILE, FRONTEND, BACKEND, OTHER
 
-    You have access to the FULL CONTENT. Read carefully and provide a high-quality summary.
+### 5. tags (array of strings)
+3-5 lowercase tags. Use hyphens instead of spaces.
 
-    Title: {article.title_en}
-    Tags: {', '.join(article.tags[:10])}
-    Content: {full_content}
+### 6. url (string)
+Return the input URL exactly as given (used for matching).
 
-    Provide a JSON response with:
-    1. "is_technical": Boolean - Is this article relevant for developers/engineers?
-        - TRUE if: technical tutorials, tech opinions, new dev tools/products, tech startups,
-          developer experience, career advice, framework/language discussions
-        - FALSE if: pure political news, non-tech business news, consumer product reviews,
-          social issues without tech focus, industry drama without technical merit
-        - KEY: Ask "Would a developer building software find this useful or interesting?"
-    2. "title_ko": A concise Korean title (max 100 characters)
-    3. "summary_ko": A COMPREHENSIVE Korean summary in MARKDOWN format that:
-        - Summarizes the ENTIRE article, not just the introduction
-        - Explains the main concepts, techniques, and key takeaways
-        - Uses markdown formatting (##, ###, -, **, `, etc.) for better readability
-        - Can be as long as needed to fully explain the content (no length limit)
-        - Should be detailed enough that readers understand the article without reading the original
-        - Include code examples or technical details if present in the original
-        - Structure fidelity: Preserve the original section order and hierarchy.
-        - Headings: If the article has headings/subtitles, reproduce them in the summary in the same order and level (e.g., ##, ###).
-        - Heading text: Keep heading titles as close to the original as possible. If you translate, keep the meaning and structure intact.
-        - No re-structuring: Do not regroup or reorder content; follow the article's flow.
-    4. "category": One of the following categories that best matches this article:
-    - AI_LLM (AI, LLM, GPT, machine learning, deep learning)
-    - DEVOPS_SRE (DevOps, SRE, CI/CD, monitoring, kubernetes, docker)
-    - INFRA_CLOUD (AWS, Azure, GCP, cloud infrastructure, serverless)
-    - DATABASE (SQL, NoSQL, PostgreSQL, MongoDB, database design)
-    - BLOCKCHAIN (Blockchain, crypto, Ethereum, Web3, smart contracts)
-    - SECURITY (Security, authentication, encryption, vulnerabilities)
-    - DATA_SCIENCE (Data science, analytics, visualization, big data)
-    - ARCHITECTURE (System architecture, microservices, design patterns)
-    - MOBILE (iOS, Android, mobile app development)
-    - FRONTEND (React, Vue, Angular, JavaScript, CSS, web frontend)
-    - BACKEND (Backend, API, Node.js, Python, Java, server-side)
-    - OTHER (anything else that doesn't fit above categories)
-    5. "tags": 3-5 short, relevant tags (lowercase, no spaces; use hyphens if needed)
+## Output Format
 
-    Response format (MUST be valid JSON):
-    {{
+Return a JSON array inside a ```json code fence. Maintain the same article order.
+No text outside the code fence.
+
+```json
+[
+  {{
+    "url": "https://example.com/article1",
     "is_technical": true,
-    "title_ko": "...",
-    "summary_ko": "## 개요\\n\\n이 글은 Python의 \\"equals\\" 연산자...\\n\\n### 주요 내용\\n\\n- 포인트 1\\n- 포인트 2",
-    "category": "AI_LLM",
-    "tags": ["tag1", "tag2"]
-    }}
+    "title_ko": "Python에서 비동기 처리 완벽 가이드",
+    "summary_ko": "## 개요\\n\\n이 글은 Python의 asyncio 라이브러리를 활용한 비동기 처리 방법을 깊이 있게 다룹니다. 동시성(concurrency)과 병렬성(parallelism)의 차이를 명확히 구분하고, 실제 프로덕션 환경에서 async/await 패턴을 효과적으로 사용하는 방법을 설명합니다.\\n\\n## async/await 패턴의 기본 사용법\\n\\nPython 3.5에서 도입된 `async/await` 구문은 비동기 코드를 동기 코드처럼 읽기 쉽게 작성할 수 있게 해줍니다. 기본적인 패턴은 다음과 같습니다:\\n\\n```python\\nasync def fetch_data(url):\\n    async with aiohttp.ClientSession() as session:\\n        async with session.get(url) as response:\\n            return await response.json()\\n\\nasync def main():\\n    results = await asyncio.gather(\\n        fetch_data('https://api.example.com/users'),\\n        fetch_data('https://api.example.com/posts')\\n    )\\n```\\n\\n`asyncio.gather()`를 사용하면 여러 코루틴을 동시에 실행하여 I/O 바운드 작업에서 상당한 성능 향상을 얻을 수 있습니다. 저자는 실제 프로젝트에서 API 호출 시간을 60% 이상 단축한 사례를 공유합니다.\\n\\n## 동시성 vs 병렬성\\n\\n동시성은 여러 작업을 번갈아 처리하는 것이고, 병렬성은 여러 작업을 실제로 동시에 처리하는 것입니다. asyncio는 동시성을 제공하며, 이는 네트워크 요청이나 파일 I/O처럼 대기 시간이 긴 작업에 특히 효과적입니다.\\n\\n## 실전 팁과 주의사항\\n\\n저자는 CPU 바운드 작업에서는 asyncio 대신 `multiprocessing`을 사용할 것을 권장하며, 혼합 워크로드에서는 `loop.run_in_executor()`를 활용한 하이브리드 접근법을 제안합니다. 또한 에러 처리, 타임아웃 설정, 디버깅 기법 등 프로덕션 환경에서 겪는 현실적인 문제와 해결책을 상세히 다룹니다.",
+    "category": "BACKEND",
+    "tags": ["python", "async", "concurrency"]
+  }}
+]
+```
 
-    IMPORTANT:
-    - All newlines in summary_ko MUST be \\n (backslash + n, not literal newline)
-    - All quotes MUST be \\" (backslash + quote)
-    - Return ONLY valid JSON, no other text
-    """
+JSON rules:
+- Newlines inside summary_ko must be \\n (escaped)
+- Quotes inside strings must be \\" (escaped)
+- Return ONLY valid JSON — no trailing commas, no comments"""
 
         return prompt
 
@@ -313,6 +178,10 @@ class SummarizerService:
                 logger.error(f"Problematic content (first 1000 chars): {content[:1000]}")
                 logger.error(f"Problematic content (last 500 chars): {content[-500:]}")
                 return [None] * len(articles)
+
+            # Handle structured output wrapper: {"articles": [...]}
+            if isinstance(data_array, dict) and "articles" in data_array:
+                data_array = data_array["articles"]
 
             # If model returned a single object, wrap it
             if isinstance(data_array, dict):
@@ -372,64 +241,88 @@ class SummarizerService:
             logger.error(f"Unexpected error parsing batch response: {e}")
             return [None] * len(articles)
 
-    def _parse_response(self, content: str) -> Dict[str, str]:
-        """Parse LLM response into structured data (single article)"""
-        try:
-            data = self._safe_json_loads(content, expect_array=False)
-            if data is None:
-                logger.error("Failed to parse LLM single-article response after all repair attempts")
-                logger.error(f"Failed content: {content[:1000]}")
-                return None
-            if isinstance(data, list) and data:
-                data = data[0]
-
-            return {
-                "is_technical": data.get("is_technical", False),
-                "title_ko": data.get("title_ko", "")[:100],
-                "summary_ko": data.get("summary_ko", ""),  # No length limit - full markdown summary
-                "category": data.get("category", "OTHER"),
-                "tags": self._clean_tags(data.get("tags"))
+    # Structured output schema for OpenAI — constrained decoding forces complete JSON
+    OPENAI_RESPONSE_SCHEMA = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "article_summaries",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "articles": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "url": {"type": "string"},
+                                "is_technical": {"type": "boolean"},
+                                "title_ko": {"type": "string"},
+                                "summary_ko": {"type": "string"},
+                                "category": {
+                                    "type": "string",
+                                    "enum": [
+                                        "AI_LLM", "DEVOPS_SRE", "INFRA_CLOUD", "DATABASE",
+                                        "BLOCKCHAIN", "SECURITY", "DATA_SCIENCE", "ARCHITECTURE",
+                                        "MOBILE", "FRONTEND", "BACKEND", "OTHER"
+                                    ]
+                                },
+                                "tags": {"type": "array", "items": {"type": "string"}}
+                            },
+                            "required": ["url", "is_technical", "title_ko", "summary_ko", "category", "tags"],
+                            "additionalProperties": False
+                        }
+                    }
+                },
+                "required": ["articles"],
+                "additionalProperties": False
             }
-        except json.JSONDecodeError:
-            logger.error(f"Failed to parse LLM response as JSON: {content}")
-            # Return None to indicate failure - don't save articles with failed summarization
-            return None
+        }
+    }
 
-    async def _summarize_batch_llm(self, articles: list[RawArticle]) -> list[Dict[str, str]]:
+    async def _summarize_batch_llm(self, articles: list[RawArticle], max_tokens_override: int = None) -> list[Dict[str, str]]:
         """Call LLM once with multiple articles"""
         try:
             prompt = self._build_batch_prompt(articles)
+            tokens = max_tokens_override or self.max_tokens
 
             if self.provider == "openai":
                 response = await self.openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
+                    model="gpt-5-nano",
                     messages=[
-                        {"role": "system", "content": "You are a helpful assistant that summarizes developer content in Korean."},
+                        {"role": "system", "content": self.SYSTEM_MESSAGE},
                         {"role": "user", "content": prompt}
                     ],
-                    temperature=0.3,
-                    max_tokens=self.max_tokens  # Max completion tokens (configurable)
+                    max_completion_tokens=min(tokens, 128000),
+                    reasoning_effort="low",
+                    response_format=self.OPENAI_RESPONSE_SCHEMA
                 )
                 content = response.choices[0].message.content
+                logger.info(
+                    f"OpenAI response: finish_reason={response.choices[0].finish_reason}, "
+                    f"usage={response.usage}"
+                )
 
             elif self.provider == "anthropic":
                 response = await self.anthropic_client.messages.create(
                     model="claude-3-5-haiku-20241022",
-                    max_tokens=self.max_tokens,  # Max completion tokens (configurable)
+                    system=self.SYSTEM_MESSAGE,
+                    max_tokens=tokens,
                     temperature=0.3,
                     messages=[{"role": "user", "content": prompt}]
                 )
                 content = response.content[0].text
 
             elif self.provider == "gemini":
+                full_prompt = f"[System Instructions]\n{self.SYSTEM_MESSAGE}\n\n[Task]\n{prompt}"
                 loop = asyncio.get_event_loop()
                 response = await loop.run_in_executor(
                     None,
                     lambda: self.gemini_model.generate_content(
-                        prompt,
+                        full_prompt,
                         generation_config=genai.types.GenerationConfig(
                             temperature=0.3,
-                            max_output_tokens=self.max_tokens,  # Max completion tokens (configurable)
+                            max_output_tokens=tokens,
                         )
                     )
                 )
@@ -448,14 +341,16 @@ class SummarizerService:
     async def summarize_batch(
         self,
         articles: list[RawArticle],
-        batch_size: int = 2,
-        delay: float = 5.0
+        batch_size: int = 5,
+        delay: float = 5.0,
+        max_tokens_override: int = None
     ) -> list[Dict[str, str]]:
         """
         Summarize multiple articles efficiently by batching them into single LLM requests
 
         NOTE: Uses FULL article content and generates comprehensive markdown summaries
-        Reduced to 2 articles per batch to avoid JSON parsing errors and timeouts
+        With OpenAI structured outputs (constrained decoding), 5 articles per batch is safe
+        within the 128k output token limit (typical: ~9k tokens per long article)
 
         Args:
             articles: List of RawArticles to summarize
@@ -473,7 +368,7 @@ class SummarizerService:
 
             # Send all articles in batch to LLM in one request
             try:
-                batch_summaries = await self._summarize_batch_llm(batch)
+                batch_summaries = await self._summarize_batch_llm(batch, max_tokens_override=max_tokens_override)
             except LLMQuotaExceeded:
                 summaries.extend([None] * len(batch))
                 remaining = len(articles) - (i + len(batch))

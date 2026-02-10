@@ -455,7 +455,7 @@ class CrawlerOrchestrator:
                 return 0
 
             # Step 2: Summarize and Categorize (Korean) - LLM does both now
-            # Efficient batching: 25 articles per LLM request, 10 seconds between requests
+            # Efficient batching: 2 articles per LLM request, 5 seconds between requests (defaults)
             summaries = await self.summarizer.summarize_batch(unique_articles)
             logger.info("Summarization and categorization completed")
 

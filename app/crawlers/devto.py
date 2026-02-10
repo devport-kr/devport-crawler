@@ -3,9 +3,12 @@
 from typing import List
 from datetime import datetime
 import asyncio
+import logging
 import httpx
 from app.crawlers.base import BaseCrawler, RawArticle
 from app.config.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 class DevToCrawler(BaseCrawler):
@@ -29,7 +32,7 @@ class DevToCrawler(BaseCrawler):
                     self.BASE_URL,
                     params={
                         "per_page": 50,
-                        "top": 7  
+                        "top": 7
                     },
                     headers={"User-Agent": self.user_agent}
                 )
@@ -38,7 +41,7 @@ class DevToCrawler(BaseCrawler):
 
                 for item in data:
                     try:
-                        article = self._parse_article(item)
+                        article = await self._parse_article(client, item)
                         if not self.should_skip(article):
                             articles.append(article)
                     except Exception as e:
@@ -55,11 +58,36 @@ class DevToCrawler(BaseCrawler):
         self.log_end(len(articles))
         return articles
 
-    def _parse_article(self, item: dict) -> RawArticle:
-        """Parse Dev.to API response into RawArticle"""
+    async def _fetch_full_body(self, client: httpx.AsyncClient, article_id: int) -> str:
+        """Fetch full article body markdown from the Dev.to detail API."""
+        try:
+            response = await client.get(
+                f"{self.BASE_URL}/{article_id}",
+                headers={"User-Agent": self.user_agent},
+                timeout=15.0,
+            )
+            response.raise_for_status()
+            detail = response.json()
+            return detail.get("body_markdown") or detail.get("body_html") or ""
+        except Exception as e:
+            logger.debug(f"Failed to fetch full body for Dev.to article {article_id}: {e}")
+            return ""
+
+    async def _parse_article(self, client: httpx.AsyncClient, item: dict) -> RawArticle:
+        """Parse Dev.to API response into RawArticle, fetching full body"""
         published_at = datetime.fromisoformat(
             item["published_at"].replace("Z", "+00:00")
         )
+
+        # Fetch full article body from detail endpoint
+        article_id = item.get("id")
+        content = ""
+        if article_id:
+            content = await self._fetch_full_body(client, article_id)
+
+        # Fall back to description if detail fetch failed
+        if not content:
+            content = item.get("description", "")
 
         return RawArticle(
             title_en=item["title"],
@@ -67,7 +95,7 @@ class DevToCrawler(BaseCrawler):
             source="devto",
             published_at=published_at,
             tags=item.get("tag_list", []),
-            content=item.get("description", ""),
+            content=content,
             upvotes=item.get("positive_reactions_count", 0),
             comments=item.get("comments_count", 0),
             read_time=f"{item.get('reading_time_minutes', 0)} min read",

@@ -81,7 +81,7 @@ class RedditCrawler(BaseCrawler):
                                 continue
 
                             try:
-                                article = self._parse_post(post, subreddit)
+                                article = await self._parse_post(client, post, subreddit)
 
                                 # Skip duplicates across subreddits
                                 if article.url in seen_urls:
@@ -111,8 +111,8 @@ class RedditCrawler(BaseCrawler):
         self.log_end(len(articles))
         return articles
 
-    def _parse_post(self, post: dict, subreddit: str) -> RawArticle:
-        """Parse Reddit post JSON into RawArticle"""
+    async def _parse_post(self, client: httpx.AsyncClient, post: dict, subreddit: str) -> RawArticle:
+        """Parse Reddit post JSON into RawArticle, fetching linked content for link posts"""
         created_ts = post.get("created_utc")
         published_at = datetime.fromtimestamp(created_ts, tz=timezone.utc) if created_ts else datetime.utcnow()
 
@@ -128,8 +128,12 @@ class RedditCrawler(BaseCrawler):
         is_self = post.get("is_self")
         source = "reddit" if is_self or domain.endswith("reddit.com") else domain
 
-        # Rough read time estimation based on self text
-        words = len(content.split())
+        # For link posts without selftext, fetch the linked article content
+        if not content and not is_self and not domain.endswith("reddit.com"):
+            content = await self.fetch_url_content(client, url, self.user_agent)
+
+        # Rough read time estimation based on content
+        words = len(content.split()) if content else 0
         read_time_minutes = max(1, words // 200) if words else None
         read_time = f"{read_time_minutes} min read" if read_time_minutes else None
 
