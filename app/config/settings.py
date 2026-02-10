@@ -15,11 +15,8 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql://user:password@localhost:5432/devportdb"
 
-    # LLM API for summarization
+    # LLM API for summarization (OpenAI gpt-5-nano)
     OPENAI_API_KEY: Optional[str] = None
-    ANTHROPIC_API_KEY: Optional[str] = None
-    GEMINI_API_KEY: Optional[str] = None
-    LLM_PROVIDER: str = "openai"  # "openai", "anthropic", or "gemini"
     LLM_MAX_TOKENS: int = 8000  # Max completion tokens (output) per request
 
     # GitHub API

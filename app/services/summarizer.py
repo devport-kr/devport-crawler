@@ -6,8 +6,6 @@ import json
 import logging
 import re
 from openai import AsyncOpenAI
-from anthropic import AsyncAnthropic
-import google.generativeai as genai
 from app.config.settings import settings
 from app.crawlers.base import RawArticle
 
@@ -45,25 +43,11 @@ class SummarizerService:
     )
 
     def __init__(self):
-        self.provider = settings.LLM_PROVIDER
         self.max_tokens = self._resolve_max_tokens()
 
-        if self.provider == "openai":
-            if not settings.OPENAI_API_KEY:
-                raise ValueError("OPENAI_API_KEY is required when LLM_PROVIDER is 'openai'")
-            self.openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-        elif self.provider == "anthropic":
-            if not settings.ANTHROPIC_API_KEY:
-                raise ValueError("ANTHROPIC_API_KEY is required when LLM_PROVIDER is 'anthropic'")
-            self.anthropic_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
-        elif self.provider == "gemini":
-            if not settings.GEMINI_API_KEY:
-                raise ValueError("GEMINI_API_KEY is required when LLM_PROVIDER is 'gemini'")
-            genai.configure(api_key=settings.GEMINI_API_KEY)
-            # Using gemini-1.5-flash for higher free tier limits (1500 RPD vs 20 RPD)
-            self.gemini_model = genai.GenerativeModel('gemini-2.5-flash')
-        else:
-            raise ValueError(f"Unsupported LLM provider: {self.provider}")
+        if not settings.OPENAI_API_KEY:
+            raise ValueError("OPENAI_API_KEY is required")
+        self.openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
 
     def _resolve_max_tokens(self) -> int:
         requested = getattr(settings, "LLM_MAX_TOKENS", 8000) or 8000
@@ -71,15 +55,12 @@ class SummarizerService:
             logger.warning(f"Invalid LLM_MAX_TOKENS={requested}; defaulting to 8000")
             requested = 8000
 
-        if self.provider == "openai":
-            hard_cap = 128000  # gpt-5-mini max completion tokens
-            if requested > hard_cap:
-                logger.warning(
-                    f"LLM_MAX_TOKENS={requested} exceeds gpt-5-mini limit {hard_cap}; clamping"
-                )
-            return min(requested, hard_cap)
-
-        return requested
+        hard_cap = 128000  # gpt-5-nano max completion tokens
+        if requested > hard_cap:
+            logger.warning(
+                f"LLM_MAX_TOKENS={requested} exceeds gpt-5-nano limit {hard_cap}; clamping"
+            )
+        return min(requested, hard_cap)
 
     def _build_batch_prompt(self, articles: list[RawArticle]) -> str:
         """Build prompt for multiple articles at once"""
@@ -286,48 +267,21 @@ JSON rules:
             prompt = self._build_batch_prompt(articles)
             tokens = max_tokens_override or self.max_tokens
 
-            if self.provider == "openai":
-                response = await self.openai_client.chat.completions.create(
-                    model="gpt-5-nano",
-                    messages=[
-                        {"role": "system", "content": self.SYSTEM_MESSAGE},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_completion_tokens=min(tokens, 128000),
-                    reasoning_effort="low",
-                    response_format=self.OPENAI_RESPONSE_SCHEMA
-                )
-                content = response.choices[0].message.content
-                logger.info(
-                    f"OpenAI response: finish_reason={response.choices[0].finish_reason}, "
-                    f"usage={response.usage}"
-                )
-
-            elif self.provider == "anthropic":
-                response = await self.anthropic_client.messages.create(
-                    model="claude-3-5-haiku-20241022",
-                    system=self.SYSTEM_MESSAGE,
-                    max_tokens=tokens,
-                    temperature=0.3,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                content = response.content[0].text
-
-            elif self.provider == "gemini":
-                full_prompt = f"[System Instructions]\n{self.SYSTEM_MESSAGE}\n\n[Task]\n{prompt}"
-                loop = asyncio.get_event_loop()
-                response = await loop.run_in_executor(
-                    None,
-                    lambda: self.gemini_model.generate_content(
-                        full_prompt,
-                        generation_config=genai.types.GenerationConfig(
-                            temperature=0.3,
-                            max_output_tokens=tokens,
-                        )
-                    )
-                )
-                content = response.text
-                logger.debug(f"Gemini response length: {len(content)} chars")
+            response = await self.openai_client.chat.completions.create(
+                model="gpt-5-nano",
+                messages=[
+                    {"role": "system", "content": self.SYSTEM_MESSAGE},
+                    {"role": "user", "content": prompt}
+                ],
+                max_completion_tokens=min(tokens, 128000),
+                reasoning_effort="low",
+                response_format=self.OPENAI_RESPONSE_SCHEMA
+            )
+            content = response.choices[0].message.content
+            logger.info(
+                f"OpenAI response: finish_reason={response.choices[0].finish_reason}, "
+                f"usage={response.usage}"
+            )
 
             return self._parse_batch_response(content, articles)
 
