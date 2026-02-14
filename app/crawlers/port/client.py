@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
+import re
 import time
 from typing import Any, Optional
 
@@ -20,6 +22,83 @@ from app.crawlers.port.contracts import (
     StargazerContract,
     TagContract,
 )
+
+logger = logging.getLogger(__name__)
+
+_REDACTED_VALUE = "***REDACTED***"
+_SENSITIVE_KEYS = (
+    "authorization",
+    "token",
+    "api_key",
+    "apikey",
+    "secret",
+    "password",
+    "cookie",
+    "session",
+)
+_PAYLOAD_KEYS = ("body", "raw", "content", "payload", "response", "notes", "markdown", "blob")
+_TOKEN_PATTERNS = (
+    re.compile(r"(?i)(bearer\s+)[^\s,;]+"),
+    re.compile(r"(?i)(token\s*[=:]\s*)[^\s,;]+"),
+    re.compile(r"(?i)(access_token=)[^&\s]+"),
+    re.compile(r"(?i)(api[_-]?key\s*[=:]\s*)[^\s,;]+"),
+    re.compile(r"(?i)(secret\s*[=:]\s*)[^\s,;]+"),
+    re.compile(r"(?i)(cookie\s*[=:]\s*)[^\s,;]+"),
+    re.compile(r"(?i)(session\s*[=:]\s*)[^\s,;]+"),
+)
+
+
+def sanitize_for_log(value: Any, *, key: Optional[str] = None) -> Any:
+    """Return a recursively sanitized copy of log payloads."""
+
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for raw_key, raw_value in value.items():
+            field = str(raw_key)
+            if _contains_keyword(field, _SENSITIVE_KEYS):
+                sanitized[field] = _REDACTED_VALUE
+                continue
+            if _contains_keyword(field, _PAYLOAD_KEYS) and isinstance(raw_value, str):
+                sanitized[field] = _redact_payload(raw_value)
+                continue
+            sanitized[field] = sanitize_for_log(raw_value, key=field)
+        return sanitized
+
+    if isinstance(value, (list, tuple, set)):
+        return [sanitize_for_log(item, key=key) for item in value]
+
+    if isinstance(value, str):
+        redacted = _redact_text(value)
+        if key and _contains_keyword(key, _PAYLOAD_KEYS):
+            return _redact_payload(redacted)
+        return redacted
+
+    return value
+
+
+def sanitize_log_extra(**kwargs: Any) -> dict[str, Any]:
+    """Helper for `extra=` payloads in structured logging."""
+
+    return {key: sanitize_for_log(value, key=key) for key, value in kwargs.items()}
+
+
+def _contains_keyword(field_name: str, keywords: tuple[str, ...]) -> bool:
+    lowered = field_name.lower()
+    return any(keyword in lowered for keyword in keywords)
+
+
+def _redact_payload(raw: str) -> str:
+    trimmed = raw.strip()
+    if not trimmed:
+        return ""
+    return f"<redacted payload ({len(raw)} chars)>"
+
+
+def _redact_text(raw: str) -> str:
+    redacted = raw
+    for pattern in _TOKEN_PATTERNS:
+        redacted = pattern.sub(rf"\1{_REDACTED_VALUE}", redacted)
+    return redacted
 
 
 class _RateLimitRetryableError(Exception):
@@ -44,7 +123,7 @@ class GitHubPortClient:
         backoff_max_seconds: Optional[float] = None,
         rate_limit_buffer_seconds: Optional[int] = None,
         base_url: Optional[str] = None,
-        transport: Optional[httpx.BaseTransport] = None,
+        transport: Optional[Any] = None,
     ) -> None:
         self._token = token or settings.GITHUB_TOKEN
         self._timeout_seconds = timeout_seconds or getattr(settings, "PORT_GITHUB_TIMEOUT_SECONDS", 30.0)
@@ -213,6 +292,15 @@ class GitHubPortClient:
 
                     if response.status_code in (403, 429):
                         wait_seconds = self._compute_rate_limit_wait(response.headers)
+                        logger.warning(
+                            "GitHub API rate limit encountered",
+                            extra=sanitize_log_extra(
+                                path=path,
+                                params=params,
+                                status_code=response.status_code,
+                                retry_after_seconds=wait_seconds,
+                            ),
+                        )
                         if wait_seconds > 0:
                             await asyncio.sleep(wait_seconds)
                         raise _RateLimitRetryableError(
@@ -227,6 +315,10 @@ class GitHubPortClient:
                         status_code=response.status_code,
                     )
         except _RateLimitRetryableError as exc:
+            logger.warning(
+                "GitHub request failed after rate-limit retries",
+                extra=sanitize_log_extra(path=path, params=params, error=str(exc), status_code=429),
+            )
             return FetchResult(
                 state=FetchState.FAILED,
                 error=str(exc),
@@ -234,12 +326,23 @@ class GitHubPortClient:
                 status_code=429,
             )
         except httpx.HTTPError as exc:
+            logger.warning(
+                "GitHub request failed",
+                extra=sanitize_log_extra(
+                    path=path,
+                    params=params,
+                    error=str(exc),
+                    status_code=getattr(getattr(exc, "response", None), "status_code", None),
+                ),
+            )
             return FetchResult(
                 state=FetchState.FAILED,
                 error=str(exc),
                 etag=etag,
                 status_code=getattr(getattr(exc, "response", None), "status_code", None),
             )
+
+        return FetchResult(state=FetchState.FAILED, error="Unknown GitHub request failure", etag=etag)
 
     async def _ensure_client(self) -> httpx.AsyncClient:
         if self._client:

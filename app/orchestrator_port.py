@@ -8,7 +8,7 @@ import logging
 from typing import Any, Callable, Sequence
 
 from app.config.database import SessionLocal
-from app.crawlers.port.client import GitHubPortClient
+from app.crawlers.port.client import GitHubPortClient, sanitize_for_log, sanitize_log_extra
 from app.crawlers.port.events_stage import EventsStage
 from app.crawlers.port.metrics_stage import MetricsStage
 from app.crawlers.port.overview_stage import (
@@ -99,16 +99,25 @@ class PortCrawlerOrchestrator:
             "stages": {},
             "errors": [],
         }
+        logger.info(
+            "Port crawler run started",
+            extra=sanitize_log_extra(mode=mode, stages_requested=list(stages), project_ids=list(project_ids or [])),
+        )
 
         for stage_name in stages:
             stage_runner = self._resolve_stage_runner(stage_name)
             if stage_runner is None:
+                unknown_error = f"Unknown stage: {stage_name}"
                 run_stats["stages"][stage_name] = {
                     "success": False,
-                    "error": f"Unknown stage: {stage_name}",
+                    "error": unknown_error,
                     "stats": {},
                 }
-                run_stats["errors"].append(f"{stage_name}: unknown stage")
+                run_stats["errors"].append(sanitize_for_log(f"{stage_name}: unknown stage"))
+                logger.warning(
+                    "Port crawler received unknown stage",
+                    extra=sanitize_log_extra(stage=stage_name, error=unknown_error),
+                )
                 continue
 
             try:
@@ -118,20 +127,36 @@ class PortCrawlerOrchestrator:
                     mode=mode,
                     requested_metrics_days=requested_metrics_days,
                 )
+                stage_error = sanitize_for_log(result.get("error")) if isinstance(result, dict) else None
+                if stage_error is not None and isinstance(result, dict):
+                    result["error"] = stage_error
                 run_stats["stages"][stage_name] = result
                 if not result.get("success", False):
-                    run_stats["errors"].append(f"{stage_name}: {result.get('error', 'stage failed')}".strip())
+                    summarized_error = sanitize_for_log(result.get("error", "stage failed"))
+                    run_stats["errors"].append(f"{stage_name}: {summarized_error}".strip())
+                    logger.warning(
+                        "Port stage reported failure",
+                        extra=sanitize_log_extra(stage=stage_name, error=summarized_error, stats=result.get("stats")),
+                    )
             except Exception as exc:
-                logger.exception("Port stage failed", extra={"stage": stage_name})
+                sanitized_error = sanitize_for_log(str(exc), key="error")
+                logger.exception(
+                    "Port stage raised exception",
+                    extra=sanitize_log_extra(stage=stage_name, error=sanitized_error),
+                )
                 run_stats["stages"][stage_name] = {
                     "success": False,
-                    "error": str(exc),
+                    "error": sanitized_error,
                     "stats": {},
                 }
-                run_stats["errors"].append(f"{stage_name}: {exc}")
+                run_stats["errors"].append(f"{stage_name}: {sanitized_error}")
 
         run_stats["completed_at"] = datetime.utcnow().isoformat()
         run_stats["success"] = all(stage.get("success", False) for stage in run_stats["stages"].values())
+        logger.info(
+            "Port crawler run completed",
+            extra=sanitize_log_extra(success=run_stats["success"], stage_count=len(run_stats["stages"]), errors=run_stats["errors"]),
+        )
         return run_stats
 
     def _resolve_stage_runner(self, stage_name: str):
@@ -218,6 +243,10 @@ class PortCrawlerOrchestrator:
                     db.rollback()
                     stats["failed_projects"] += 1
                     stats["failure_reasons"].append({"project": project.full_name, "reasons": [str(exc)]})
+                    logger.warning(
+                        "Events stage failed for project",
+                        extra=sanitize_log_extra(stage=STAGE_EVENTS, project=project.full_name, error=str(exc)),
+                    )
 
         try:
             if self._events_stage is not None:
@@ -279,6 +308,10 @@ class PortCrawlerOrchestrator:
                     db.rollback()
                     stats["failed_projects"] += 1
                     stats["cap_reasons"].append({"project": project.full_name, "reason": f"failed: {exc}"})
+                    logger.warning(
+                        "Star history stage failed for project",
+                        extra=sanitize_log_extra(stage=STAGE_STAR_HISTORY, project=project.full_name, error=str(exc)),
+                    )
 
         try:
             if self._star_history_stage is not None:
@@ -330,6 +363,10 @@ class PortCrawlerOrchestrator:
                 response = await client.get_repo(owner, repo)
                 if response.is_failed:
                     failed += 1
+                    logger.warning(
+                        "Metrics stage repo fetch failed",
+                        extra=sanitize_log_extra(stage=STAGE_METRICS, repo=project.full_name, error=response.error),
+                    )
                     continue
 
                 data = response.data or {}
