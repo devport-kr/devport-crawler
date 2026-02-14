@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
+from typing import Any
 
 from app.jobs.port_sync import normalize_stage_selector, run_port_backfill, run_port_daily_sync
 from app.orchestrator_port import ALL_STAGES, DAILY_DEFAULT_STAGES, PortCrawlerOrchestrator
@@ -103,3 +105,104 @@ def test_stage_selector_defaults_and_filters_unknown_values() -> None:
     assert normalize_stage_selector(None, default=DAILY_DEFAULT_STAGES) == list(DAILY_DEFAULT_STAGES)
     assert normalize_stage_selector("events,metrics,invalid", default=DAILY_DEFAULT_STAGES) == ["events", "metrics"]
     assert normalize_stage_selector([], default=ALL_STAGES) == list(ALL_STAGES)
+
+
+def test_projects_stage_runs_discovery_when_payload_not_injected(monkeypatch) -> None:
+    class FakeDB:
+        def commit(self) -> None:
+            return None
+
+        def rollback(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    class FakeProjectsStage:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def ingest_repositories(self, _db: Any, *, port_id: int, repositories: list[dict[str, Any]]) -> dict[str, int]:
+            self.calls.append({"port_id": port_id, "repositories": repositories})
+            return {
+                "input": len(repositories),
+                "created": len(repositories),
+                "updated": 0,
+                "failed": 0,
+                "processed": len(repositories),
+            }
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            del exc_type, exc, tb
+
+    @dataclass
+    class FakePort:
+        id: int
+        slug: str
+        name: str
+        description: str
+        port_number: int
+
+    fake_stage = FakeProjectsStage()
+    orchestrator = PortCrawlerOrchestrator(
+        session_factory=lambda: FakeDB(),
+        github_client_factory=lambda: FakeClient(),
+        projects_stage=fake_stage,
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_or_seed_ports",
+        lambda _db: [FakePort(id=1, slug="llm", name="LLMs", description="", port_number=11434)],
+    )
+
+    async def fake_discovery(*, client: Any, ports: list[FakePort]):
+        del client, ports
+        return (
+            {
+                1: [
+                    {
+                        "id": 101,
+                        "name": "demo",
+                        "full_name": "acme/demo",
+                        "html_url": "https://github.com/acme/demo",
+                    }
+                ]
+            },
+            {
+                "ports_considered": 1,
+                "ports_with_candidates": 1,
+                "candidates_discovered": 1,
+                "candidates_selected": 1,
+            },
+        )
+
+    monkeypatch.setattr(orchestrator, "_discover_repositories_by_port", fake_discovery)
+
+    result = asyncio.run(orchestrator.run_projects_stage())
+
+    assert result["success"] is True
+    assert result["stats"]["ports"] == 1
+    assert result["stats"]["created"] == 1
+    assert len(fake_stage.calls) == 1
+    assert fake_stage.calls[0]["port_id"] == 1
+
+
+def test_overview_llm_uses_injected_callback() -> None:
+    async def fake_llm(_prompt: str) -> dict[str, object]:
+        return {
+            "summary": "요약",
+            "highlights": ["포인트"],
+            "quickstart": None,
+            "links": [],
+        }
+
+    orchestrator = PortCrawlerOrchestrator(overview_llm_call=fake_llm)
+    payload = asyncio.run(orchestrator._call_overview_llm("prompt"))
+
+    assert isinstance(payload, dict)
+    assert payload["summary"] == "요약"

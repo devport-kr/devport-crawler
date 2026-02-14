@@ -151,6 +151,59 @@ class GitHubPortClient:
         path = f"/repos/{owner}/{repo}"
         return await self._fetch_json_contract(path, etag=etag)
 
+    async def search_repositories(
+        self,
+        query: str,
+        *,
+        page: int = 1,
+        per_page: int = 50,
+        sort: str = "stars",
+        order: str = "desc",
+        etag: Optional[str] = None,
+    ) -> FetchResult[list[dict[str, Any]]]:
+        """Search GitHub repositories using query syntax.
+
+        Returns the `items` payload from `/search/repositories` as a typed contract.
+        """
+
+        response = await self._request(
+            "/search/repositories",
+            params={
+                "q": query,
+                "page": page,
+                "per_page": per_page,
+                "sort": sort,
+                "order": order,
+            },
+            etag=etag,
+            accept=self.ACCEPT_JSON,
+        )
+        if response.state != FetchState.OK:
+            return FetchResult(
+                state=response.state,
+                data=None,
+                etag=response.etag,
+                status_code=response.status_code,
+                error=response.error,
+            )
+
+        payload = response.data if isinstance(response.data, dict) else {}
+        items = payload.get("items") if isinstance(payload.get("items"), list) else []
+        if not items:
+            return FetchResult(
+                state=FetchState.EMPTY,
+                data=[],
+                etag=response.etag,
+                status_code=response.status_code,
+            )
+
+        return FetchResult(
+            state=FetchState.OK,
+            data=items,
+            etag=response.etag,
+            status_code=response.status_code,
+        )
+
     async def list_releases(
         self,
         owner: str,
