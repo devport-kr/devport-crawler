@@ -11,6 +11,8 @@ from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
+MIN_CONTENT_LENGTH = 500
+
 
 class RawArticle:
     """
@@ -100,6 +102,23 @@ class BaseCrawler(ABC):
         self.logger.error(f"Error in {self.__class__.__name__}: {str(error)}", exc_info=True)
 
     @staticmethod
+    def load_existing_urls() -> set[str]:
+        """Load existing article URLs from the database for dedup before expensive retries."""
+        try:
+            from app.config.database import SessionLocal
+            from app.models.article import Article
+            db = SessionLocal()
+            try:
+                urls = {row.url for row in db.query(Article.url).all()}
+                logger.info(f"Loaded {len(urls)} existing URLs for pre-dedup")
+                return urls
+            finally:
+                db.close()
+        except Exception as e:
+            logger.warning(f"Failed to load existing URLs (skipping pre-dedup): {e}")
+            return set()
+
+    @staticmethod
     async def fetch_url_content(
         client: httpx.AsyncClient,
         url: str,
@@ -162,3 +181,106 @@ class BaseCrawler(ABC):
         except Exception as e:
             logger.debug(f"Failed to fetch content from {url}: {e}")
             return ""
+
+    @staticmethod
+    async def fetch_url_content_playwright(url: str, max_chars: int = 15000) -> str:
+        """
+        Retry fetching content using Playwright headless browser.
+
+        Handles JS-rendered pages that httpx can't fetch.
+        Returns extracted text or empty string on failure.
+        """
+        if not url:
+            return ""
+
+        try:
+            from playwright.async_api import async_playwright
+
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=settings.PLAYWRIGHT_HEADLESS)
+                try:
+                    page = await browser.new_page(
+                        user_agent=settings.USER_AGENT,
+                    )
+                    await page.goto(url, wait_until="domcontentloaded", timeout=settings.PLAYWRIGHT_TIMEOUT)
+                    # Give JS a moment to render content
+                    await page.wait_for_timeout(2000)
+
+                    html = await page.content()
+                finally:
+                    await browser.close()
+
+            soup = BeautifulSoup(html, "lxml")
+
+            # Remove non-content elements
+            for tag in soup(["script", "style", "nav", "header", "footer", "aside",
+                             "iframe", "noscript", "form", "button", "svg"]):
+                tag.decompose()
+
+            main = soup.find("article") or soup.find("main") or soup.find("body")
+            if not main:
+                return ""
+
+            text = main.get_text(separator="\n", strip=True)
+            text = re.sub(r"\n{3,}", "\n\n", text)
+
+            if len(text) > max_chars:
+                text = text[:max_chars] + "\n\n[Content truncated]"
+
+            return text
+
+        except Exception as e:
+            logger.debug(f"Playwright fetch failed for {url}: {e}")
+            return ""
+
+    @staticmethod
+    async def send_discord_webhook(source_name: str, failed_articles: list[dict]) -> None:
+        """
+        Send failed article info to Discord webhook.
+
+        Args:
+            source_name: crawler name (e.g. "HackerNews", "Reddit")
+            failed_articles: list of dicts with keys: title, url, discussion_url, upvotes, comments
+        """
+        webhook_url = settings.DISCORD_WEBHOOK_URL
+        if not webhook_url or not failed_articles:
+            return
+
+        # Build individual entry strings
+        entries = []
+        for i, art in enumerate(failed_articles, 1):
+            entry = f"\n**{i}. {art['title'][:80]}**"
+            entry += f"\n🔗 {art['url']}"
+            if art.get("discussion_url"):
+                entry += f"\n💬 {art['discussion_url']}"
+            if art.get("upvotes") is not None or art.get("comments") is not None:
+                stats = []
+                if art.get("upvotes") is not None:
+                    stats.append(f"{art['upvotes']} points")
+                if art.get("comments") is not None:
+                    stats.append(f"{art['comments']} comments")
+                entry += f"\n📊 {' | '.join(stats)}"
+            entries.append(entry)
+
+        # Split into multiple messages to stay under Discord 2000 char limit
+        header = (
+            f"🔴 **Failed Content Fetches — {source_name}**\n"
+            f"{len(failed_articles)} articles failed after Playwright retry\n"
+        )
+        messages = []
+        current = header
+        for entry in entries:
+            if len(current) + len(entry) > 1900:
+                messages.append(current)
+                current = f"🔴 **...continued ({source_name})**\n"
+            current += entry
+        messages.append(current)
+
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                for msg in messages:
+                    resp = await client.post(webhook_url, json={"content": msg})
+                    resp.raise_for_status()
+                logger.info(f"Sent Discord webhook: {len(failed_articles)} failed articles from {source_name} ({len(messages)} messages)")
+        except Exception as e:
+            logger.warning(f"Failed to send Discord webhook: {e}")

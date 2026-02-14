@@ -75,3 +75,6 @@ storage/
 docs/
 *.md
 !README.md
+
+# Planning artifacts
+.planning/

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.crawlers.devto import DevToCrawler
 from app.crawlers.hashnode import HashnodeCrawler
-from app.crawlers.medium import MediumCrawler
+# from app.crawlers.medium import MediumCrawler  # Disabled: ~70% of articles are RSS excerpts, not full content
 from app.crawlers.reddit import RedditCrawler
 from app.crawlers.hackernews import HackerNewsCrawler
 from app.crawlers.github import GitHubCrawler
@@ -54,7 +54,7 @@ class CrawlerOrchestrator:
         sources = [
             ("devto", DevToCrawler()),
             ("hashnode", HashnodeCrawler()),
-            ("medium", MediumCrawler()),
+            # ("medium", MediumCrawler()),  # Disabled: ~70% of articles are RSS excerpts, not full content
             ("reddit", RedditCrawler()),
             ("hackernews", HackerNewsCrawler())
         ]
@@ -317,40 +317,38 @@ class CrawlerOrchestrator:
 
         return stats
 
-    async def run_medium_crawler(self) -> Dict[str, Any]:
-        """
-        Run Medium crawler
-
-        Returns:
-            Dictionary with crawling statistics
-        """
-        logger.info("Starting Medium crawler...")
-
-        stats = {
-            "started_at": datetime.utcnow().isoformat(),
-            "source": "medium",
-            "crawled": 0,
-            "saved": 0,
-            "success": False
-        }
-
-        try:
-            crawler = MediumCrawler()
-            articles = await crawler.crawl()
-            saved = await self._process_and_save_articles(articles)
-
-            stats["crawled"] = len(articles)
-            stats["saved"] = saved
-            stats["success"] = True
-
-        except Exception as e:
-            logger.error(f"Error crawling Medium: {e}", exc_info=True)
-            stats["error"] = str(e)
-
-        stats["completed_at"] = datetime.utcnow().isoformat()
-        logger.info(f"Medium crawler completed. Saved: {stats['saved']}")
-
-        return stats
+    # async def run_medium_crawler(self) -> Dict[str, Any]:
+    #     """
+    #     Run Medium crawler
+    #     Disabled: ~70% of articles are RSS excerpts ("Continue reading on..."), not full content.
+    #     """
+    #     logger.info("Starting Medium crawler...")
+    #
+    #     stats = {
+    #         "started_at": datetime.utcnow().isoformat(),
+    #         "source": "medium",
+    #         "crawled": 0,
+    #         "saved": 0,
+    #         "success": False
+    #     }
+    #
+    #     try:
+    #         crawler = MediumCrawler()
+    #         articles = await crawler.crawl()
+    #         saved = await self._process_and_save_articles(articles)
+    #
+    #         stats["crawled"] = len(articles)
+    #         stats["saved"] = saved
+    #         stats["success"] = True
+    #
+    #     except Exception as e:
+    #         logger.error(f"Error crawling Medium: {e}", exc_info=True)
+    #         stats["error"] = str(e)
+    #
+    #     stats["completed_at"] = datetime.utcnow().isoformat()
+    #     logger.info(f"Medium crawler completed. Saved: {stats['saved']}")
+    #
+    #     return stats
 
     async def run_reddit_crawler(self) -> Dict[str, Any]:
         """

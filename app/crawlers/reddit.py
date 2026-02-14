@@ -6,7 +6,7 @@ import asyncio
 import httpx
 import re
 from urllib.parse import urlparse
-from app.crawlers.base import BaseCrawler, RawArticle
+from app.crawlers.base import BaseCrawler, RawArticle, MIN_CONTENT_LENGTH
 from app.config.settings import settings
 
 
@@ -53,6 +53,9 @@ class RedditCrawler(BaseCrawler):
         self.log_start()
         articles: List[RawArticle] = []
         seen_urls = set()
+
+        # Load existing URLs to skip Playwright retry for already-saved articles
+        self._existing_urls = self.load_existing_urls()
 
         try:
             token = await self._get_access_token()
@@ -108,6 +111,25 @@ class RedditCrawler(BaseCrawler):
         except Exception as e:
             self.log_error(e)
 
+        # Send Discord webhook for link posts that failed content fetch
+        # Only report articles that pass should_skip (high-engagement, non-media)
+        failed_articles = []
+        for a in articles:
+            is_link_post = not a.raw_data.get("is_self") and not a.raw_data.get("domain", "").endswith("reddit.com")
+            if is_link_post and len(a.content or "") < MIN_CONTENT_LENGTH and not self.should_skip(a):
+                permalink = a.raw_data.get("permalink", "")
+                failed_articles.append({
+                    "title": a.title_en,
+                    "url": a.url,
+                    "discussion_url": f"https://www.reddit.com{permalink}" if permalink else None,
+                    "upvotes": a.upvotes,
+                    "comments": a.comments,
+                })
+
+        if failed_articles:
+            self.logger.info(f"{len(failed_articles)} Reddit articles failed content fetch (< {MIN_CONTENT_LENGTH} chars)")
+            await self.send_discord_webhook("Reddit", failed_articles)
+
         self.log_end(len(articles))
         return articles
 
@@ -129,8 +151,17 @@ class RedditCrawler(BaseCrawler):
         source = "reddit" if is_self or domain.endswith("reddit.com") else domain
 
         # For link posts without selftext, fetch the linked article content
+        used_playwright = False
         if not content and not is_self and not domain.endswith("reddit.com"):
             content = await self.fetch_url_content(client, url, self.user_agent)
+
+            # Retry with Playwright if content is too short (skip if URL already in DB)
+            if len(content) < MIN_CONTENT_LENGTH and url not in self._existing_urls:
+                self.logger.debug(f"httpx got {len(content)} chars for {url}, retrying with Playwright")
+                pw_content = await self.fetch_url_content_playwright(url)
+                if len(pw_content) >= MIN_CONTENT_LENGTH:
+                    content = pw_content
+                    used_playwright = True
 
         # Rough read time estimation based on content
         words = len(content.split()) if content else 0
@@ -149,7 +180,7 @@ class RedditCrawler(BaseCrawler):
             upvotes=post.get("score") or post.get("ups") or 0,
             comments=post.get("num_comments", 0),
             read_time=read_time,
-            raw_data=post
+            raw_data={**post, "used_playwright": used_playwright},
         )
 
     def should_skip(self, article: RawArticle) -> bool:
