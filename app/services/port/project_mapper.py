@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 
@@ -58,6 +58,31 @@ def map_repo_to_project_row(
         "last_release": repo_payload.get("last_release") or getattr(existing, "last_release", None),
         "updated_at": now,
         "created_at": getattr(existing, "created_at", now),
+    }
+
+
+def map_metrics_to_daily_row(
+    *,
+    project_id: int,
+    snapshot_date: date,
+    metrics_payload: dict[str, Any],
+    existing: Any | None = None,
+) -> dict[str, Any]:
+    """Map payload into `project_metrics_daily` contract plus derived extras."""
+
+    return {
+        "project_id": project_id,
+        "date": snapshot_date,
+        "stars": _pick_int(metrics_payload.get("stargazers_count"), getattr(existing, "stars", 0)),
+        "forks": _pick_int(metrics_payload.get("forks_count"), getattr(existing, "forks", 0)),
+        "open_issues": _pick_int(metrics_payload.get("open_issues_count"), getattr(existing, "open_issues", 0)),
+        "contributors": _pick_int(metrics_payload.get("contributors_count"), getattr(existing, "contributors", 0)),
+        "stars_week_delta": _pick_int(metrics_payload.get("stars_week_delta"), getattr(existing, "stars_week_delta", 0)),
+        "releases_30d": _pick_int(metrics_payload.get("releases_30d"), getattr(existing, "releases_30d", 0)),
+        "last_release_age_days": _pick_int(
+            metrics_payload.get("last_release_age_days"),
+            getattr(existing, "last_release_age_days", 0),
+        ),
     }
 
 
