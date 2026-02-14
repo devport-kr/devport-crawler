@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     PORT_BACKFILL_MAX_RELEASE_PAGES: int = 50
     PORT_BACKFILL_MAX_TAG_PAGES: int = 50
     PORT_BACKFILL_CHANGELOG_MAX_CHARS: int = 120000
+    PORT_METRICS_HISTORY_DAYS_CAP: int = 730
 
     # Port-domain stage cadence controls
     PORT_PROJECT_SYNC_HOURS: int = 24
