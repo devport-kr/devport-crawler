@@ -151,7 +151,7 @@ class WikiStage:
         """Build 'What this project is' section with purpose and target users."""
         summary = f"{project.name} - {project.description or 'No description available'}"
         
-        deep_dive = self._prompt_builder.build_what_explanation(
+        deep_dive = await self._prompt_builder.build_what_explanation(
             name=project.name,
             description=project.description or "",
             topics=getattr(project, "topics", []),
@@ -165,7 +165,7 @@ class WikiStage:
 
     async def _build_how_section(self, project: Project) -> WikiSection:
         """Build 'How it works' section with key concepts and workflow."""
-        deep_dive = self._prompt_builder.build_how_explanation(
+        deep_dive = await self._prompt_builder.build_how_explanation(
             name=project.name,
             description=project.description or "",
         )
@@ -178,7 +178,7 @@ class WikiStage:
 
     async def _build_architecture_section(self, project: Project) -> WikiSection:
         """Build architecture/codebase section with adaptive depth."""
-        deep_dive = self._prompt_builder.build_architecture_explanation(
+        deep_dive = await self._prompt_builder.build_architecture_explanation(
             name=project.name,
             language=getattr(project, "language", "Unknown"),
         )
