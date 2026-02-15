@@ -43,22 +43,22 @@ Project: {name}
 Description: {description}
 Topics: {topics_text}
 
-Write a deep technical explanation covering:
+Write a deep technical explanation in KOREAN covering:
 
-1. **Purpose and Domain** - What problem this project solves and what domain it operates in
-2. **Core Capabilities** - What it actually does (be specific about features/functionality)
-3. **Target Users** - Who should use this (specific personas: backend devs, DevOps engineers, data scientists, etc.)
-4. **Why This Project Matters** - Its position in the ecosystem, unique value proposition
+1. **목적과 도메인** - What problem this project solves and what domain it operates in
+2. **핵심 기능** - What it actually does (be specific about features/functionality)
+3. **대상 사용자** - Who should use this (specific personas: backend devs, DevOps engineers, data scientists, etc.)
+4. **왜 중요한가** - Its position in the ecosystem, unique value proposition
 
-Write in engineer-to-engineer tone. Be factual and specific. Use markdown with headers (###). 
+Write in engineer-to-engineer tone in KOREAN. Be factual and specific. Use markdown with headers (###). 
 Do NOT include generic phrases like "to be populated" or "based on context". 
-Length: 200-400 words."""
+Length: 200-400 words in KOREAN."""
 
         try:
             response = await self._client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "You are a technical documentation writer for open-source projects. Write clear, factual, engineer-to-engineer content."},
+                    {"role": "system", "content": "You are a technical documentation writer for open-source projects. Write clear, factual, engineer-to-engineer content in KOREAN language."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7,
@@ -104,21 +104,21 @@ Engineers and teams working with {topics_text} technologies."""
 Project: {name}
 Description: {description}
 
-Write a deep technical explanation covering:
+Write a deep technical explanation in KOREAN covering:
 
-1. **Key Concepts** - Core abstractions, patterns, or mental models users need to understand
-2. **Workflow** - Typical usage flow from setup to execution (be specific about steps)
-3. **Integration Patterns** - How this fits into a developer's stack/workflow
+1. **핵심 개념** - Core abstractions, patterns, or mental models users need to understand
+2. **워크플로우** - Typical usage flow from setup to execution (be specific about steps)
+3. **통합 패턴** - How this fits into a developer's stack/workflow
 
-Write in engineer-to-engineer tone. Be specific and actionable. Use markdown with headers (###).
+Write in engineer-to-engineer tone in KOREAN. Be specific and actionable. Use markdown with headers (###).
 Do NOT use generic placeholder text. Infer realistic workflow based on the project type.
-Length: 200-400 words."""
+Length: 200-400 words in KOREAN."""
 
         try:
             response = await self._client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "You are a technical documentation writer for open-source projects. Write clear, factual, actionable content."},
+                    {"role": "system", "content": "You are a technical documentation writer for open-source projects. Write clear, factual, actionable content in KOREAN language."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7,
@@ -161,22 +161,22 @@ Length: 200-400 words."""
 Project: {name}
 Primary Language: {language}
 
-Write a deep technical explanation covering:
+Write a deep technical explanation in KOREAN covering:
 
-1. **Technical Stack** - Languages, frameworks, key dependencies (infer realistic ones for a {language} project)
-2. **Architectural Pattern** - Overall design approach (monolith, microservices, library, CLI tool, etc.)
-3. **Core Components** - Main modules/packages and their responsibilities
-4. **Design Patterns** - Key patterns used (if applicable to project type)
+1. **기술 스택** - Languages, frameworks, key dependencies (infer realistic ones for a {language} project)
+2. **아키텍처 패턴** - Overall design approach (monolith, microservices, library, CLI tool, etc.)
+3. **핵심 컴포넌트** - Main modules/packages and their responsibilities
+4. **디자인 패턴** - Key patterns used (if applicable to project type)
 
-Write in engineer-to-engineer tone. Be specific about technical choices. Use markdown with headers (###).
+Write in engineer-to-engineer tone in KOREAN. Be specific about technical choices. Use markdown with headers (###).
 Infer realistic architecture based on project type and language. Be concrete, not generic.
-Length: 200-400 words."""
+Length: 200-400 words in KOREAN."""
 
         try:
             response = await self._client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "You are a technical documentation writer for open-source projects. Write clear, specific architectural explanations."},
+                    {"role": "system", "content": "You are a technical documentation writer for open-source projects. Write clear, specific architectural explanations in KOREAN language."},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.7,
