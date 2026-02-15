@@ -232,9 +232,9 @@ class WikiStage:
 
         section_to_dict = lambda s: {
             "summary": s.summary,
-            "deep_dive_markdown": s.deep_dive_markdown,
-            "default_expanded": s.default_expanded,
-            "generated_diagram_dsl": s.generated_diagram_dsl,
+            "deepDiveMarkdown": s.deep_dive_markdown,  # Use camelCase for Java compatibility
+            "defaultExpanded": s.default_expanded,
+            "generatedDiagramDsl": s.generated_diagram_dsl,
         }
 
         now = datetime.now(UTC)
