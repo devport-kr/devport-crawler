@@ -82,7 +82,9 @@ async def test_events_stage_prefers_releases_before_tags_and_changelog() -> None
     assert result.skipped_event_update is False
     assert len(db.rows) == 1
     assert db.rows[0].version == "v1.2.3"
-    assert "SECURITY" in db.rows[0].event_types
+    assert db.rows[0].summary != "v1.2.3"
+    assert "릴리스" in db.rows[0].summary
+    assert "security" in db.rows[0].event_types
 
 
 @pytest.mark.asyncio
@@ -99,6 +101,7 @@ async def test_events_stage_uses_tags_when_releases_empty() -> None:
     assert result.source == "tags"
     assert result.updated_count == 1
     assert db.rows[0].version == "v2.0.0"
+    assert "태그 릴리스" in db.rows[0].summary
 
 
 @pytest.mark.asyncio

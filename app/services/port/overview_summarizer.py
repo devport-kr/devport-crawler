@@ -27,6 +27,8 @@ class OverviewSummaryPayload(BaseModel):
         cleaned = value.strip()
         if not cleaned:
             raise ValueError("summary is required")
+        if len(cleaned) < 20:
+            raise ValueError("summary too short")
 
         banned = ("최고", "완벽", "혁신", "놀라운", "강력한", "반드시", "!!!")
         if any(token in cleaned for token in banned):
@@ -37,6 +39,8 @@ class OverviewSummaryPayload(BaseModel):
     @classmethod
     def validate_highlights(cls, value: list[str]) -> list[str]:
         cleaned = [item.strip() for item in value if isinstance(item, str) and item.strip()]
+        if len(cleaned) < 2:
+            raise ValueError("highlights must include at least 2 items")
         return cleaned[:8]
 
     @field_validator("links")
@@ -100,11 +104,17 @@ class OverviewSummarizerService:
     def _build_prompt(self, *, project_name: str, source_markdown: str, links: list[dict[str, str]]) -> str:
         links_json = json.dumps(self._normalize_links(links), ensure_ascii=False)
         return (
-            "프로젝트 개요를 중립적이고 사실 기반 한국어로 deep-digest 요약하세요.\n"
+            "역할: 한국 개발자를 위한 오픈소스 기술 문서 에디터.\n"
+            "목표: 프로젝트의 핵심 가치, 적용 시나리오, 운영 관점 포인트를 빠르게 파악할 수 있는 요약을 작성하세요.\n"
             "아래 JSON 스키마를 반드시 지키세요: "
             '{"summary": "string", "highlights": ["string"], "quickstart": "string|null", '
             '"links": [{"label": "string", "url": "string"}]}.\n'
-            "마케팅 문구, 과장 표현, 감탄사 없이 작성하세요.\n\n"
+            "작성 규칙:\n"
+            "- summary: 한국어 2~3문장, 핵심 기능/용도/도입 포인트 포함\n"
+            "- highlights: 4~8개, 각 항목은 한 문장으로 구체적으로 작성\n"
+            "- quickstart: 원문에 명시된 설치/실행 명령만 포함\n"
+            "- 금지: LICENSE/CONTRIBUTING/배지 설명 위주 내용, 마케팅 문구, 과장 표현\n"
+            "- 사실 기반으로만 작성하고 추측하지 마세요.\n\n"
             f"프로젝트: {project_name}\n"
             f"링크: {links_json}\n\n"
             "원문:\n"

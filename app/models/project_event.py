@@ -13,12 +13,12 @@ from app.config.database import Base
 class EventType(str, enum.Enum):
     """Event type values must stay compatible with DevPort API enum."""
 
-    FEATURE = "FEATURE"
-    FIX = "FIX"
-    SECURITY = "SECURITY"
-    BREAKING = "BREAKING"
-    PERF = "PERF"
-    MISC = "MISC"
+    FEATURE = "feature"
+    FIX = "fix"
+    SECURITY = "security"
+    BREAKING = "breaking"
+    PERF = "perf"
+    MISC = "misc"
 
 
 class ProjectEvent(Base):

@@ -237,6 +237,7 @@ class WikiStage:
             "generated_diagram_dsl": s.generated_diagram_dsl,
         }
 
+        now = datetime.now(UTC)
         payload = {
             "project_external_id": snapshot.project_external_id,
             "generated_at": datetime.fromisoformat(snapshot.generated_at),
@@ -255,10 +256,13 @@ class WikiStage:
             # Update existing
             for key, value in payload.items():
                 setattr(existing, key, value)
+            setattr(existing, "updated_at", now)
             db.flush()
             return False
         else:
             # Create new
+            payload["created_at"] = now
+            payload["updated_at"] = now
             db.add(ProjectWikiSnapshot(**payload))
             db.flush()
             return True

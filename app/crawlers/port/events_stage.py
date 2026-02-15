@@ -31,6 +31,15 @@ CHANGELOG_PATH_CANDIDATES = (
     "releases.md",
 )
 
+_TYPE_SUMMARY_KO = {
+    "security": "보안 패치",
+    "breaking": "호환성 영향 변경",
+    "feature": "새 기능",
+    "fix": "버그 수정",
+    "perf": "성능 개선",
+    "misc": "유지보수 업데이트",
+}
+
 
 @dataclass(slots=True)
 class EventRow:
@@ -121,7 +130,8 @@ class EventsStage:
         for release in releases:
             version = str(release.get("tag_name") or release.get("name") or "unknown")
             body = str(release.get("body") or "")
-            summary = str(release.get("name") or version)
+            title = str(release.get("name") or version)
+            summary = self._build_korean_summary(version=version, title=title, raw_notes=body)
             released_at = self._parse_date(release.get("published_at") or release.get("created_at"))
             source_url = release.get("html_url")
             rows.append(self._build_row(project_id, version, released_at, summary, body, source_url))
@@ -134,7 +144,7 @@ class EventsStage:
             commit = tag.get("commit") if isinstance(tag.get("commit"), dict) else {}
             sha = str(commit.get("sha") or "")
             source_url = commit.get("url") if isinstance(commit.get("url"), str) else None
-            summary = f"Tag released: {version}"
+            summary = f"{version} 태그 릴리스: 버전 식별용 스냅샷이 반영되었습니다."
             body = sha
             released_at = date.today()
             rows.append(self._build_row(project_id, version, released_at, summary, body, source_url))
@@ -165,12 +175,48 @@ class EventsStage:
                     project_id,
                     version or f"changelog-{index + 1}",
                     date.today(),
-                    f"Changelog {version}",
+                    self._build_korean_summary(
+                        version=version or f"changelog-{index + 1}",
+                        title=f"Changelog {version}",
+                        raw_notes=notes,
+                    ),
                     notes,
                     None,
                 )
             )
         return rows
+
+    def _build_korean_summary(self, *, version: str, title: str, raw_notes: str) -> str:
+        classification = classify_event(title=title, body=raw_notes)
+        labels: list[str] = []
+        for event_type in classification.event_types:
+            labels.append(_TYPE_SUMMARY_KO.get(event_type) or _TYPE_SUMMARY_KO["misc"])
+        unique_labels = list(dict.fromkeys(labels))
+        labels_text = ", ".join(unique_labels[:3]) if unique_labels else _TYPE_SUMMARY_KO["misc"]
+
+        lead = f"{version} 릴리스: {labels_text} 중심 변경이 포함되었습니다."
+        note = self._extract_primary_note(raw_notes)
+        if note:
+            return f"{lead} 주요 변경: {note}"
+        return lead
+
+    @staticmethod
+    def _extract_primary_note(raw_notes: str) -> str:
+        for line in raw_notes.splitlines():
+            candidate = line.strip()
+            if not candidate:
+                continue
+            if candidate.startswith("#"):
+                continue
+            candidate = re.sub(r"^[-*+>\s]+", "", candidate).strip()
+            if not candidate:
+                continue
+            candidate = re.sub(r"\[[^\]]+\]\(([^)]+)\)", r"\1", candidate)
+            candidate = re.sub(r"`([^`]+)`", r"\1", candidate)
+            candidate = candidate.replace("\t", " ").strip()
+            if candidate:
+                return candidate[:320]
+        return ""
 
     def _build_row(
         self,

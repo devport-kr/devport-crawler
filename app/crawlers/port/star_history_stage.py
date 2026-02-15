@@ -102,6 +102,14 @@ class StarHistoryStage:
             star_dates.extend(self._extract_star_dates(response.data))
 
         source_points = self._build_cumulative_points(star_dates)
+        if not source_points:
+            fallback_stars = max(int(getattr(project, "stars", 0) or 0), 0)
+            if fallback_stars > 0:
+                source_points = [StarPoint(date.today(), fallback_stars)]
+        elif int(getattr(project, "stars", 0) or 0) > 0:
+            latest_known = max(int(source_points[-1].stars), int(getattr(project, "stars", 0) or 0))
+            source_points.append(StarPoint(date.today(), latest_known))
+
         rolled_points = rollup_star_points(source_points, recent_days=self._recent_days)
         stored_count = self._upsert_points(db, project.id, rolled_points)
 
