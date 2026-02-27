@@ -92,8 +92,6 @@ class MetricsStage:
                     "forks": row["forks"],
                     "open_issues": row["open_issues"],
                     "contributors": row["contributors"],
-                    "stars_week_delta": row["stars_week_delta"],
-                    "releases_30d": row["releases_30d"],
                 }
                 for row in rows
             ]
@@ -105,8 +103,6 @@ class MetricsStage:
                 "forks": statement.excluded.forks,
                 "open_issues": statement.excluded.open_issues,
                 "contributors": statement.excluded.contributors,
-                "stars_week_delta": statement.excluded.stars_week_delta,
-                "releases_30d": statement.excluded.releases_30d,
             },
         )
 
@@ -129,8 +125,6 @@ class MetricsStage:
                         forks=row["forks"],
                         open_issues=row["open_issues"],
                         contributors=row["contributors"],
-                        stars_week_delta=row["stars_week_delta"],
-                        releases_30d=row["releases_30d"],
                     )
                 )
                 continue
@@ -139,8 +133,6 @@ class MetricsStage:
             existing.forks = row["forks"]
             existing.open_issues = row["open_issues"]
             existing.contributors = row["contributors"]
-            existing.stars_week_delta = row["stars_week_delta"]
-            existing.releases_30d = row["releases_30d"]
 
     @staticmethod
     def _sync_project_rollup(db: Any, row: dict[str, Any]) -> None:
@@ -151,5 +143,3 @@ class MetricsStage:
         project.stars = row["stars"]
         project.forks = row["forks"]
         project.contributors = row["contributors"]
-        project.stars_week_delta = row["stars_week_delta"]
-        project.releases_30d = row["releases_30d"]

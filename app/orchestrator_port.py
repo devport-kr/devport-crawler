@@ -2,81 +2,59 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict
 from datetime import UTC, date, datetime
+import hashlib
+import hmac
+import json
 import logging
+import random
 from typing import Any, Awaitable, Callable, Sequence
 
-from openai import AsyncOpenAI
-from sqlalchemy import text
+import httpx
 
 from app.config.database import SessionLocal
 from app.config.settings import settings
 from app.crawlers.port.client import GitHubPortClient, sanitize_for_log, sanitize_log_extra
 from app.crawlers.port.events_stage import EventsStage
 from app.crawlers.port.metrics_stage import MetricsStage
-from app.crawlers.port.overview_stage import (
-    OverviewProjectRef,
-    ProjectOverviewStage,
-    SQLAlchemyOverviewRepository,
-)
 from app.crawlers.port.projects_stage import ProjectsStage
-from app.crawlers.port.star_history_stage import StarHistoryCheckpoint, StarHistoryStage
-from app.crawlers.wiki.wiki_stage import WikiStage
 from app.models.port import Port
 from app.models.project import Project
 from app.services.port.candidate_selector import CandidateSelector, RepoCandidate
-from app.services.port.overview_sources import OverviewSourceAggregator
-from app.services.port.overview_summarizer import PLACEHOLDER_TEXT, OverviewSummarizerService
-from app.services.port.port_seed_catalog import PortSeed, get_default_port_seeds
 
 logger = logging.getLogger(__name__)
 
 STAGE_PROJECTS = "projects"
 STAGE_EVENTS = "events"
-STAGE_STAR_HISTORY = "star_history"
 STAGE_METRICS = "metrics"
-STAGE_OVERVIEWS = "overviews"
-STAGE_WIKI = "wiki"
 
-ALL_STAGES = (STAGE_PROJECTS, STAGE_EVENTS, STAGE_STAR_HISTORY, STAGE_METRICS, STAGE_OVERVIEWS, STAGE_WIKI)
-DAILY_DEFAULT_STAGES = (STAGE_EVENTS, STAGE_METRICS, STAGE_OVERVIEWS, STAGE_WIKI)
-DEFAULT_SEARCH_RESULTS_PER_PORT = 50
+ALL_STAGES = (STAGE_PROJECTS, STAGE_EVENTS, STAGE_METRICS)
+DAILY_DEFAULT_STAGES = (STAGE_EVENTS, STAGE_METRICS)
+WEBHOOK_SCOPE = "GIT_REPO"
 
-OVERVIEW_SYSTEM_MESSAGE = (
-    "You write concise, factual Korean summaries for open-source software projects. "
-    "Do not use marketing language or speculation. Return strict JSON only."
+GLOBAL_BASELINE_REPOS = (
+    "ollama/ollama",
+    "vllm-project/vllm",
+    "huggingface/text-generation-inference",
+    "langchain-ai/langchain",
+    "microsoft/autogen",
+    "crewAIInc/crewAI",
+    "openai/openai-python",
+    "anthropics/anthropic-sdk-python",
+    "vercel/ai",
+    "mlflow/mlflow",
+    "wandb/wandb",
+    "bentoml/BentoML",
 )
 
-OVERVIEW_JSON_SCHEMA = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "port_overview_summary",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "summary": {"type": "string"},
-                "highlights": {"type": "array", "items": {"type": "string"}},
-                "quickstart": {"type": ["string", "null"]},
-                "links": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "label": {"type": "string"},
-                            "url": {"type": "string"},
-                        },
-                        "required": ["label", "url"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "required": ["summary", "highlights", "quickstart", "links"],
-            "additionalProperties": False,
-        },
-    },
-}
+GLOBAL_KEYWORDS = (
+    "llm", "inference", "model serving", "rag",
+    "agent", "agentic", "tool-use", "multi-agent",
+    "ai sdk", "ai cli", "code assistant", "copilot",
+    "mlops", "experiment tracking", "model registry",
+)
 
 
 class PortCrawlerOrchestrator:
@@ -89,20 +67,13 @@ class PortCrawlerOrchestrator:
         github_client_factory: Callable[[], Any] = GitHubPortClient,
         projects_stage: Any | None = None,
         events_stage: Any | None = None,
-        star_history_stage: Any | None = None,
         metrics_stage: Any | None = None,
-        overview_stage: Any | None = None,
-        overview_llm_call: Callable[[str], Awaitable[Any]] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._github_client_factory = github_client_factory
         self._projects_stage = projects_stage
         self._events_stage = events_stage
-        self._star_history_stage = star_history_stage
         self._metrics_stage = metrics_stage
-        self._overview_stage = overview_stage
-        self._overview_llm_call = overview_llm_call
-        self._openai_client: AsyncOpenAI | None = None
 
     async def run_daily_sync(
         self,
@@ -203,20 +174,88 @@ class PortCrawlerOrchestrator:
 
         run_stats["completed_at"] = datetime.utcnow().isoformat()
         run_stats["success"] = all(stage.get("success", False) for stage in run_stats["stages"].values())
+        webhook_result = await self._dispatch_completion_webhook(run_stats)
+        if webhook_result is not None:
+            run_stats["webhook"] = webhook_result
         logger.info(
             "Port crawler run completed",
             extra=sanitize_log_extra(success=run_stats["success"], stage_count=len(run_stats["stages"]), errors=run_stats["errors"]),
         )
         return run_stats
 
+    def _build_completion_webhook_payload(self, run_stats: dict[str, Any]) -> dict[str, Any]:
+        """Build boundary-safe completion payload."""
+        started_at = str(run_stats.get("started_at") or datetime.now(UTC).isoformat())
+        completed_at = str(run_stats.get("completed_at") or datetime.now(UTC).isoformat())
+        mode = str(run_stats.get("mode") or "daily")
+
+        return {
+            "job_id": f"port-{mode}-{started_at}",
+            "scope": WEBHOOK_SCOPE,
+            "completed_at": completed_at,
+        }
+
+    async def _dispatch_completion_webhook(self, run_stats: dict[str, Any]) -> dict[str, Any] | None:
+        """Dispatch completion webhook with retry/backoff semantics."""
+        webhook_url = str(getattr(settings, "CRAWLER_WEBHOOK_URL", "") or "").strip()
+        webhook_secret = str(getattr(settings, "CRAWLER_WEBHOOK_SECRET", "") or "").strip()
+        if not webhook_url or not webhook_secret:
+            return None
+
+        payload = self._build_completion_webhook_payload(run_stats)
+        payload_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        signature = hmac.new(
+            webhook_secret.encode("utf-8"),
+            payload_json.encode("utf-8"),
+            digestmod=hashlib.sha256,
+        ).hexdigest()
+        signed_payload = dict(payload)
+        signed_payload["signature"] = signature
+
+        max_retries = max(int(getattr(settings, "CRAWLER_WEBHOOK_MAX_RETRIES", 3) or 3), 1)
+        timeout_seconds = float(getattr(settings, "CRAWLER_WEBHOOK_TIMEOUT_SECONDS", 10.0) or 10.0)
+
+        last_error: str | None = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+                    response = await client.post(webhook_url, json=signed_payload)
+                if response.status_code < 400:
+                    return {
+                        "sent": True,
+                        "attempts": attempt,
+                        "status_code": response.status_code,
+                    }
+
+                last_error = f"HTTP {response.status_code}"
+            except Exception as exc:
+                last_error = str(exc)
+
+            if attempt < max_retries:
+                await asyncio.sleep(self._retry_delay_seconds(attempt))
+
+        logger.warning(
+            "Crawler completion webhook delivery failed",
+            extra=sanitize_log_extra(error=last_error, retries=max_retries),
+        )
+        return {
+            "sent": False,
+            "attempts": max_retries,
+            "error": sanitize_for_log(last_error or "unknown error"),
+        }
+
+    @staticmethod
+    def _retry_delay_seconds(attempt: int) -> float:
+        """Exponential backoff with jitter: 100ms base, 2000ms cap, +/-25%."""
+        base = min(0.1 * (2 ** max(attempt - 1, 0)), 2.0)
+        jitter = random.uniform(0.75, 1.25)
+        return base * jitter
+
     def _resolve_stage_runner(self, stage_name: str):
         mapping = {
             STAGE_PROJECTS: self.run_projects_stage,
             STAGE_EVENTS: self.run_events_stage,
-            STAGE_STAR_HISTORY: self.run_star_history_stage,
             STAGE_METRICS: self.run_metrics_stage,
-            STAGE_OVERVIEWS: self.run_overview_stage,
-            STAGE_WIKI: self.run_wiki_stage,
         }
         return mapping.get(stage_name)
 
@@ -227,34 +266,60 @@ class PortCrawlerOrchestrator:
         checkpoints: dict[str, dict[str, Any]] | None = None,
         mode: str = "daily",
         requested_metrics_days: int = 3650,
-        repositories_by_port: dict[int, list[dict[str, Any]]] | None = None,
+        repositories_payloads: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         del checkpoints, mode, requested_metrics_days
 
         stage = self._projects_stage or ProjectsStage()
         db = self._session_factory()
         stats = {
-            "ports": 0,
             "input": 0,
             "created": 0,
             "updated": 0,
             "failed": 0,
             "processed": 0,
-            "ports_considered": 0,
-            "ports_with_candidates": 0,
             "candidates_discovered": 0,
             "candidates_selected": 0,
         }
         try:
-            payloads_by_port = repositories_by_port
-            if payloads_by_port is None:
-                ports = self._load_or_seed_ports(db)
+            payloads = repositories_payloads
+            if payloads is None:
                 async with self._github_client_factory() as client:
-                    payloads_by_port, discovery_stats = await self._discover_repositories_by_port(
-                        client=client,
-                        ports=ports,
-                    )
-                stats.update(discovery_stats)
+                    baseline_payloads = await self._fetch_baseline_repositories(client=client, baseline_repos=GLOBAL_BASELINE_REPOS)
+                    auto_payloads = await self._discover_repositories(client)
+
+                payload_by_external_id: dict[str, dict[str, Any]] = {}
+                for payload in [*baseline_payloads, *auto_payloads]:
+                    external_id = self._repo_external_id(payload)
+                    if external_id:
+                        payload_by_external_id[external_id] = payload
+
+                manual_candidates = [
+                    candidate
+                    for candidate in (self._repo_payload_to_candidate(payload) for payload in baseline_payloads)
+                    if candidate is not None
+                ]
+                auto_candidates = [
+                    candidate
+                    for candidate in (self._repo_payload_to_candidate(payload) for payload in auto_payloads)
+                    if candidate is not None and candidate.external_id not in {item.external_id for item in manual_candidates}
+                ]
+
+                stats["candidates_discovered"] += len(manual_candidates) + len(auto_candidates)
+                selector = CandidateSelector()
+                selected = selector.select_candidates(
+                    manual_baseline=manual_candidates,
+                    auto_candidates=auto_candidates,
+                    relevance_keywords=GLOBAL_KEYWORDS,
+                    target_count=getattr(settings, "PORT_PROJECT_GLOBAL_TARGET", 1000),
+                )
+                stats["candidates_selected"] += len(selected)
+
+                payloads = []
+                for candidate in selected:
+                    payload = payload_by_external_id.get(candidate.external_id)
+                    if payload is not None:
+                        payloads.append(payload)
 
             if project_ids:
                 logger.info(
@@ -262,21 +327,19 @@ class PortCrawlerOrchestrator:
                     extra=sanitize_log_extra(stage=STAGE_PROJECTS, project_ids=list(project_ids)),
                 )
 
-            if not payloads_by_port:
+            if not payloads:
                 return {
                     "success": True,
                     "skipped": True,
-                    "stats": {**stats, "reason": "No repositories discovered for configured ports"},
+                    "stats": {**stats, "reason": "No repositories discovered"},
                 }
 
-            for port_id, payloads in payloads_by_port.items():
-                result = stage.ingest_repositories(db, port_id=int(port_id), repositories=payloads)
-                stats["ports"] += 1
-                stats["input"] += int(result.get("input", 0))
-                stats["created"] += int(result.get("created", 0))
-                stats["updated"] += int(result.get("updated", 0))
-                stats["failed"] += int(result.get("failed", 0))
-                stats["processed"] += int(result.get("processed", 0))
+            result = stage.ingest_repositories(db, repositories=payloads)
+            stats["input"] += int(result.get("input", 0))
+            stats["created"] += int(result.get("created", 0))
+            stats["updated"] += int(result.get("updated", 0))
+            stats["failed"] += int(result.get("failed", 0))
+            stats["processed"] += int(result.get("processed", 0))
             db.commit()
             return {"success": True, "stats": stats}
         except Exception as exc:
@@ -339,70 +402,7 @@ class PortCrawlerOrchestrator:
         finally:
             db.close()
 
-    async def run_star_history_stage(
-        self,
-        *,
-        project_ids: Sequence[int] | None = None,
-        checkpoints: dict[str, dict[str, Any]] | None = None,
-        mode: str = "daily",
-        requested_metrics_days: int = 3650,
-    ) -> dict[str, Any]:
-        del mode, requested_metrics_days
-        db = self._session_factory()
-        projects = self._load_projects(db, project_ids=project_ids)
-        if not projects:
-            db.close()
-            return {"success": True, "skipped": True, "stats": {"reason": "No tracked projects found"}}
 
-        checkpoint_payloads = checkpoints or {}
-        stats = {
-            "projects": len(projects),
-            "stored_points": 0,
-            "source_points": 0,
-            "fetched_pages": 0,
-            "failed_projects": 0,
-            "checkpoints": {},
-            "cap_reasons": [],
-        }
-
-        async def _run(stage: Any) -> None:
-            for project in projects:
-                incoming = checkpoint_payloads.get(project.external_id)
-                checkpoint = StarHistoryCheckpoint(**incoming) if incoming else None
-                try:
-                    result = await stage.ingest_project(db, project, checkpoint=checkpoint)
-                    stats["stored_points"] += int(result.stored_points)
-                    stats["source_points"] += int(result.source_points)
-                    stats["fetched_pages"] += int(result.fetched_pages)
-                    stats["checkpoints"][project.external_id] = asdict(result.checkpoint)
-                    if result.checkpoint.reached_cap:
-                        stats["cap_reasons"].append(
-                            {
-                                "project": project.full_name,
-                                "reason": f"stargazer pages capped at {stage._max_pages}",
-                            }
-                        )
-                    db.commit()
-                except Exception as exc:
-                    db.rollback()
-                    stats["failed_projects"] += 1
-                    stats["cap_reasons"].append({"project": project.full_name, "reason": f"failed: {exc}"})
-                    logger.warning(
-                        "Star history stage failed for project",
-                        extra=sanitize_log_extra(stage=STAGE_STAR_HISTORY, project=project.full_name, error=str(exc)),
-                    )
-
-        try:
-            if self._star_history_stage is not None:
-                await _run(self._star_history_stage)
-            else:
-                async with self._github_client_factory() as client:
-                    await _run(StarHistoryStage(client))
-            return {"success": True, "stats": stats}
-        except Exception as exc:
-            return {"success": False, "error": str(exc), "stats": stats}
-        finally:
-            db.close()
 
     async def run_metrics_stage(
         self,
@@ -456,8 +456,6 @@ class PortCrawlerOrchestrator:
                         "forks_count": int(data.get("forks_count") or project.forks or 0),
                         "open_issues_count": int(data.get("open_issues_count") or 0),
                         "contributors_count": int(data.get("subscribers_count") or project.contributors or 0),
-                        "stars_week_delta": int(project.stars_week_delta or 0),
-                        "releases_30d": int(project.releases_30d or 0),
                     }
                 )
             return payloads, failed
@@ -490,86 +488,6 @@ class PortCrawlerOrchestrator:
         finally:
             db.close()
 
-    async def run_overview_stage(
-        self,
-        *,
-        project_ids: Sequence[int] | None = None,
-        checkpoints: dict[str, dict[str, Any]] | None = None,
-        mode: str = "daily",
-        requested_metrics_days: int = 3650,
-    ) -> dict[str, Any]:
-        del checkpoints, mode, requested_metrics_days
-        db = self._session_factory()
-        projects = self._load_projects(db, project_ids=project_ids)
-        if not projects:
-            db.close()
-            return {"success": True, "skipped": True, "stats": {"reason": "No tracked projects found"}}
-
-        refs = self._build_overview_refs(projects)
-        if not refs:
-            db.close()
-            return {"success": True, "skipped": True, "stats": {"reason": "No valid project names"}}
-
-        try:
-            if self._overview_stage is not None:
-                stage = self._overview_stage
-                stage_stats = await stage.run(refs)
-            else:
-                async with self._github_client_factory() as client:
-                    source_aggregator = OverviewSourceAggregator(client)
-                    summarizer = OverviewSummarizerService(llm_call=self._call_overview_llm)
-                    repository = SQLAlchemyOverviewRepository(db)
-                    stage = ProjectOverviewStage(
-                        source_aggregator=source_aggregator,
-                        summarizer=summarizer,
-                        repository=repository,
-                    )
-                    stage_stats = await stage.run(refs)
-
-            db.commit()
-            return {"success": True, "stats": asdict(stage_stats)}
-        except Exception as exc:
-            db.rollback()
-            return {"success": False, "error": str(exc), "stats": {}}
-        finally:
-            db.close()
-
-    async def run_wiki_stage(
-        self,
-        *,
-        project_ids: Sequence[int] | None = None,
-        checkpoints: dict[str, dict[str, Any]] | None = None,
-        mode: str = "daily",
-        requested_metrics_days: int = 3650,
-    ) -> dict[str, Any]:
-        """Execute wiki snapshot generation stage."""
-        del checkpoints, mode, requested_metrics_days
-        db = self._session_factory()
-        projects = self._load_projects(db, project_ids=project_ids)
-        if not projects:
-            db.close()
-            return {"success": True, "skipped": True, "stats": {"reason": "No tracked projects found"}}
-
-        try:
-            async with self._github_client_factory() as client:
-                stage = WikiStage(github_client=client)
-                result = await stage.run(db=db, projects=projects)
-            return result
-        except Exception as exc:
-            db.rollback()
-            return {"success": False, "error": str(exc), "stats": {}}
-        finally:
-            db.close()
-
-    @staticmethod
-    async def _fallback_overview_llm_call(_: str) -> dict[str, Any]:
-        return {
-            "summary": PLACEHOLDER_TEXT,
-            "highlights": [],
-            "quickstart": None,
-            "links": [],
-        }
-
     @staticmethod
     def _load_projects(db: Any, *, project_ids: Sequence[int] | None) -> list[Project]:
         query = db.query(Project)
@@ -582,36 +500,17 @@ class PortCrawlerOrchestrator:
         owner, repo = full_name.split("/", 1)
         return owner.strip(), repo.strip()
 
-    @staticmethod
-    def _build_overview_refs(projects: Sequence[Project]) -> list[OverviewProjectRef]:
-        refs: list[OverviewProjectRef] = []
-        for project in projects:
-            if "/" not in project.full_name:
-                continue
-            owner, repo = project.full_name.split("/", 1)
-            refs.append(
-                OverviewProjectRef(
-                    project_id=int(project.id),
-                    owner=owner.strip(),
-                    repo=repo.strip(),
-                    project_name=project.name,
-                )
-            )
-        return refs
-
     def _ensure_runtime_schema_compatibility(self) -> None:
         """Add required Port columns when running against older schemas."""
 
         statements = (
             "ALTER TABLE project_events ADD COLUMN IF NOT EXISTS event_types TEXT[]",
             "ALTER TABLE project_events ADD COLUMN IF NOT EXISTS bullets TEXT[]",
-            "ALTER TABLE project_metrics_daily ADD COLUMN IF NOT EXISTS stars_week_delta INTEGER",
-            "ALTER TABLE project_metrics_daily ADD COLUMN IF NOT EXISTS releases_30d INTEGER",
-            "ALTER TABLE project_overviews ADD COLUMN IF NOT EXISTS highlights TEXT[]",
         )
 
         db = self._session_factory()
         try:
+            from sqlalchemy import text
             for statement in statements:
                 db.execute(text(statement))
             db.commit()
@@ -624,117 +523,41 @@ class PortCrawlerOrchestrator:
         finally:
             db.close()
 
-    @staticmethod
-    def _load_or_seed_ports(db: Any) -> list[Port]:
-        """Load tracked ports, seeding defaults when table is empty."""
-
-        existing_ports = list(db.query(Port).all())
-        if existing_ports:
-            return existing_ports
-
-        for seed in get_default_port_seeds():
-            db.add(
-                Port(
-                    external_id=f"port:{seed.slug}",
-                    port_number=seed.port_number,
-                    slug=seed.slug,
-                    name=seed.name,
-                    description=seed.description,
-                    accent_color=seed.accent_color,
-                )
-            )
-        db.flush()
-        return list(db.query(Port).all())
-
-    async def _discover_repositories_by_port(
+    async def _discover_repositories(
         self,
-        *,
         client: GitHubPortClient,
-        ports: Sequence[Port],
-    ) -> tuple[dict[int, list[dict[str, Any]]], dict[str, int]]:
-        """Build per-port repository payloads via baseline + automatic search."""
+    ) -> list[dict[str, Any]]:
+        """Automatically source new AI/trending repository payloads globally."""
+        search_pages = 5
+        results_per_page = 100
+        keywords_per_query = 3
+        chunks = [
+            list(GLOBAL_KEYWORDS)[i : i + keywords_per_query]
+            for i in range(0, len(GLOBAL_KEYWORDS), keywords_per_query)
+        ]
 
-        selector = CandidateSelector()
-        seed_map = {seed.slug: seed for seed in get_default_port_seeds()}
+        all_payloads: list[dict[str, Any]] = []
 
-        repositories_by_port: dict[int, list[dict[str, Any]]] = {}
-        stats = {
-            "ports_considered": 0,
-            "ports_with_candidates": 0,
-            "candidates_discovered": 0,
-            "candidates_selected": 0,
-        }
+        for chunk in chunks:
+            query = " OR ".join(f'"{k}"' for k in chunk) + " stars:>=500000 archived:false"
+            for page in range(1, search_pages + 1):
+                response = await client.search_repositories(
+                    query,
+                    page=page,
+                    per_page=results_per_page,
+                    sort="stars",
+                    order="desc",
+                )
+                if response.is_ok and response.data:
+                    all_payloads.extend(response.data)
+                elif response.is_failed:
+                    logger.warning(
+                        "Repository search failed during global discovery",
+                        extra=sanitize_log_extra(stage=STAGE_PROJECTS, query=query, error=response.error),
+                    )
+                    break
 
-        for port in sorted(ports, key=lambda item: int(item.port_number or 0)):
-            stats["ports_considered"] += 1
-            seed_profile = self._resolve_seed_profile(port=port, seed=seed_map.get(str(port.slug)))
-
-            baseline_payloads = await self._fetch_baseline_repositories(client=client, baseline_repos=seed_profile.baseline_repos)
-            auto_payloads = await self._search_auto_candidates(client=client, keywords=seed_profile.keywords)
-
-            payload_by_external_id: dict[str, dict[str, Any]] = {}
-            for payload in [*baseline_payloads, *auto_payloads]:
-                external_id = self._repo_external_id(payload)
-                if external_id:
-                    payload_by_external_id[external_id] = payload
-
-            manual_candidates = [
-                candidate
-                for candidate in (self._repo_payload_to_candidate(payload) for payload in baseline_payloads)
-                if candidate is not None
-            ]
-            auto_candidates = [
-                candidate
-                for candidate in (self._repo_payload_to_candidate(payload) for payload in auto_payloads)
-                if candidate is not None and candidate.external_id not in {item.external_id for item in manual_candidates}
-            ]
-
-            stats["candidates_discovered"] += len(manual_candidates) + len(auto_candidates)
-            selected = selector.select_candidates(
-                manual_baseline=manual_candidates,
-                auto_candidates=auto_candidates,
-                relevance_keywords=seed_profile.keywords,
-                target_count=getattr(settings, "PORT_PROJECT_TARGET_MAX", 20),
-            )
-            stats["candidates_selected"] += len(selected)
-
-            selected_payloads: list[dict[str, Any]] = []
-            for candidate in selected:
-                payload = payload_by_external_id.get(candidate.external_id)
-                if payload is not None:
-                    selected_payloads.append(payload)
-
-            if selected_payloads:
-                repositories_by_port[int(port.id)] = selected_payloads
-                stats["ports_with_candidates"] += 1
-
-        return repositories_by_port, stats
-
-    @staticmethod
-    def _resolve_seed_profile(*, port: Port, seed: PortSeed | None) -> PortSeed:
-        if seed is not None:
-            return seed
-
-        fallback_keywords = tuple(
-            {
-                token.strip().lower()
-                for token in [str(port.slug or ""), str(port.name or ""), str(port.description or "")]
-                for token in token.replace("/", " ").replace("-", " ").split()
-                if token.strip()
-            }
-        )
-        if not fallback_keywords:
-            fallback_keywords = ("developer", "opensource")
-
-        return PortSeed(
-            slug=str(port.slug),
-            name=str(port.name),
-            port_number=int(port.port_number),
-            description=str(port.description or ""),
-            accent_color=str(port.accent_color or "#64748b"),
-            keywords=fallback_keywords,
-            baseline_repos=(),
-        )
+        return all_payloads
 
     async def _fetch_baseline_repositories(
         self,
@@ -766,7 +589,7 @@ class PortCrawlerOrchestrator:
         response = await client.search_repositories(
             query,
             page=1,
-            per_page=DEFAULT_SEARCH_RESULTS_PER_PORT,
+            per_page=100,
             sort="stars",
             order="desc",
         )
@@ -830,45 +653,3 @@ class PortCrawlerOrchestrator:
         if value.tzinfo is None:
             return value.replace(tzinfo=UTC)
         return value
-
-    async def _call_overview_llm(self, prompt: str) -> Any:
-        if self._overview_llm_call is not None:
-            return await self._overview_llm_call(prompt)
-        return await self._default_overview_llm_call(prompt)
-
-    async def _default_overview_llm_call(self, prompt: str) -> Any:
-        if not settings.OPENAI_API_KEY:
-            logger.warning(
-                "OPENAI_API_KEY not configured; using overview placeholder fallback",
-                extra=sanitize_log_extra(stage=STAGE_OVERVIEWS),
-            )
-            return await self._fallback_overview_llm_call(prompt)
-
-        if self._openai_client is None:
-            self._openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-
-        model_order = ["gpt-5-mini", "gpt-5-nano"]
-        max_tokens = min(int(getattr(settings, "LLM_MAX_TOKENS", 6000)), 8000)
-
-        last_error: Exception | None = None
-        for model in model_order:
-            try:
-                response = await self._openai_client.chat.completions.create(
-                    model=model,
-                    messages=[
-                        {"role": "system", "content": OVERVIEW_SYSTEM_MESSAGE},
-                        {"role": "user", "content": prompt},
-                    ],
-                    max_completion_tokens=max_tokens,
-                    reasoning_effort="low",
-                    response_format=OVERVIEW_JSON_SCHEMA,
-                )
-                return (response.choices[0].message.content or "").strip()
-            except Exception as exc:
-                last_error = exc
-                logger.warning(
-                    "Overview LLM model call failed; trying fallback model",
-                    extra=sanitize_log_extra(stage=STAGE_OVERVIEWS, model=model, error=str(exc)),
-                )
-
-        raise ValueError(f"overview llm call failed: {last_error}")

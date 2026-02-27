@@ -3,24 +3,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from math import log1p
 from typing import Iterable, Sequence
 
 from app.config.settings import settings
 
 
-# Locked policy defaults (Phase 4 context decisions).
-DEFAULT_PORT_TARGET_MIN = 15
-DEFAULT_PORT_TARGET_MAX = 20
-DEFAULT_PROJECT_TARGET_MIN = 12
-DEFAULT_PROJECT_TARGET_MAX = 20
 
 # Candidate score defaults (relevance gate + weighted stars/activity ranking).
 DEFAULT_WEIGHT_RELEVANCE = 0.55
 DEFAULT_WEIGHT_STARS = 0.30
 DEFAULT_WEIGHT_ACTIVITY = 0.15
 DEFAULT_DIVERSITY_PENALTY = 0.12
+
+# Filtering thresholds for AI-focused / trending repos.
+DEFAULT_MAX_INACTIVE_DAYS = 180
 
 
 @dataclass(slots=True)
@@ -45,13 +43,8 @@ class RepoCandidate:
 class SelectionConfig:
     """Configurable scoring and scope knobs."""
 
-    port_target_min: int = field(default_factory=lambda: getattr(settings, "PORT_TARGET_MIN", DEFAULT_PORT_TARGET_MIN))
-    port_target_max: int = field(default_factory=lambda: getattr(settings, "PORT_TARGET_MAX", DEFAULT_PORT_TARGET_MAX))
-    project_target_min: int = field(
-        default_factory=lambda: getattr(settings, "PORT_PROJECT_TARGET_MIN", DEFAULT_PROJECT_TARGET_MIN)
-    )
-    project_target_max: int = field(
-        default_factory=lambda: getattr(settings, "PORT_PROJECT_TARGET_MAX", DEFAULT_PROJECT_TARGET_MAX)
+    global_target: int = field(
+        default_factory=lambda: getattr(settings, "PORT_PROJECT_GLOBAL_TARGET", 1000)
     )
     relevance_weight: float = field(
         default_factory=lambda: getattr(settings, "PORT_CANDIDATE_WEIGHT_RELEVANCE", DEFAULT_WEIGHT_RELEVANCE)
@@ -66,11 +59,14 @@ class SelectionConfig:
         default_factory=lambda: getattr(settings, "PORT_CANDIDATE_DIVERSITY_SOFT_CAP", 3)
     )
     diversity_penalty: float = DEFAULT_DIVERSITY_PENALTY
+    max_inactive_days: int = field(
+        default_factory=lambda: getattr(settings, "PORT_CANDIDATE_MAX_INACTIVE_DAYS", DEFAULT_MAX_INACTIVE_DAYS)
+    )
     now_provider: callable = datetime.now
 
 
 class CandidateSelector:
-    """Selects per-port repositories from manual baseline and automatic expansion."""
+    """Selects global repositories from manual baseline and automatic expansion."""
 
     def __init__(self, config: SelectionConfig | None = None) -> None:
         self.config = config or SelectionConfig()
@@ -122,13 +118,20 @@ class CandidateSelector:
         return selected
 
     def _clamp_target(self, target_count: int | None) -> int:
-        if target_count is None:
-            target_count = self.config.project_target_max
-        return max(self.config.project_target_min, min(target_count, self.config.project_target_max))
+        return max(1, target_count if target_count is not None else self.config.global_target)
 
     def _passes_relevance_gate(self, candidate: RepoCandidate, keywords: set[str]) -> bool:
         if candidate.archived or candidate.disabled:
             return False
+
+        # Recency gate: exclude repos not pushed in the last N days
+        if candidate.pushed_at is not None:
+            now = self.config.now_provider(UTC)
+            pushed = candidate.pushed_at if candidate.pushed_at.tzinfo else candidate.pushed_at.replace(tzinfo=UTC)
+            cutoff = now - timedelta(days=self.config.max_inactive_days)
+            if pushed < cutoff:
+                return False
+
         if not keywords:
             return True
 

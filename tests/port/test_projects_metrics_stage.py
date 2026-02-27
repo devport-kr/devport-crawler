@@ -14,7 +14,6 @@ from app.models.project_metrics_daily import ProjectMetricsDaily
 class FakeProjectRow:
     id: int | None
     external_id: str
-    port_id: int
     name: str
     full_name: str
     repo_url: str
@@ -42,8 +41,6 @@ class FakeMetricRow:
     forks: int
     open_issues: int
     contributors: int
-    stars_week_delta: int
-    releases_30d: int
 
 
 class FakeQuery:
@@ -89,7 +86,6 @@ class FakeDB:
             record = FakeProjectRow(
                 id=self.next_project_id,
                 external_id=row.external_id,
-                port_id=row.port_id,
                 name=row.name,
                 full_name=row.full_name,
                 repo_url=row.repo_url,
@@ -120,8 +116,6 @@ class FakeDB:
             forks=row.forks,
             open_issues=row.open_issues,
             contributors=row.contributors,
-            stars_week_delta=row.stars_week_delta,
-            releases_30d=row.releases_30d,
         )
         self.metrics[(metric_row.project_id, metric_row.date)] = metric_row
 
@@ -145,8 +139,8 @@ def test_projects_stage_replay_does_not_increase_row_count() -> None:
         "license": {"spdx_id": "MIT"},
     }
 
-    first = stage.ingest_repositories(db, port_id=9, repositories=[payload])
-    second = stage.ingest_repositories(db, port_id=9, repositories=[payload])
+    first = stage.ingest_repositories(db, repositories=[payload])
+    second = stage.ingest_repositories(db, repositories=[payload])
 
     assert first["created"] == 1
     assert second["created"] == 0
@@ -179,8 +173,8 @@ def test_projects_stage_preserves_existing_optional_values_on_partial_payload() 
         "forks_count": 28,
     }
 
-    stage.ingest_repositories(db, port_id=4, repositories=[full_payload])
-    stage.ingest_repositories(db, port_id=4, repositories=[partial_payload])
+    stage.ingest_repositories(db, repositories=[full_payload])
+    stage.ingest_repositories(db, repositories=[partial_payload])
 
     row = db.projects_by_external_id["github:202"]
     assert row.stars == 310
@@ -197,7 +191,6 @@ def test_metrics_stage_preserves_project_id_date_uniqueness_on_rerun() -> None:
     db = FakeDB()
     projects_stage.ingest_repositories(
         db,
-        port_id=7,
         repositories=[
             {
                 "id": 909,
@@ -218,9 +211,6 @@ def test_metrics_stage_preserves_project_id_date_uniqueness_on_rerun() -> None:
         "forks_count": 41,
         "open_issues_count": 9,
         "contributors_count": 11,
-        "stars_week_delta": 12,
-        "releases_30d": 2,
-        "last_release_age_days": 4,
     }
 
     first = metrics_stage.ingest_daily_metrics(db, metrics_payloads=[payload], snapshot_date=snapshot_date)
@@ -241,7 +231,6 @@ def test_metrics_stage_updates_project_rollup_fields_from_latest_snapshot() -> N
     db = FakeDB()
     projects_stage.ingest_repositories(
         db,
-        port_id=3,
         repositories=[
             {
                 "id": 300,
@@ -266,8 +255,6 @@ def test_metrics_stage_updates_project_rollup_fields_from_latest_snapshot() -> N
                 "forks_count": 30,
                 "open_issues_count": 5,
                 "contributors_count": 8,
-                "stars_week_delta": 20,
-                "releases_30d": 3,
             }
         ],
     )
@@ -276,5 +263,3 @@ def test_metrics_stage_updates_project_rollup_fields_from_latest_snapshot() -> N
     assert updated_project.stars == 250
     assert updated_project.forks == 30
     assert updated_project.contributors == 8
-    assert updated_project.stars_week_delta == 20
-    assert updated_project.releases_30d == 3

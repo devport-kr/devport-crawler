@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class ProjectsStage:
     """Ingests GitHub repositories into the `projects` dataset."""
 
-    def ingest_repositories(self, db: Any, *, port_id: int, repositories: Sequence[dict[str, Any]]) -> dict[str, int]:
+    def ingest_repositories(self, db: Any, *, repositories: Sequence[dict[str, Any]]) -> dict[str, int]:
         """Upsert project rows by stable external identity without destructive clearing."""
 
         created = 0
@@ -26,7 +26,7 @@ class ProjectsStage:
             try:
                 external_id = build_project_external_id(repo_payload)
                 existing = db.query(Project).filter_by(external_id=external_id).first()
-                row = map_repo_to_project_row(port_id=port_id, repo_payload=repo_payload, existing=existing)
+                row = map_repo_to_project_row(repo_payload=repo_payload, existing=existing)
 
                 if existing is None:
                     db.add(Project(**row))

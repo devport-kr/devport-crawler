@@ -19,7 +19,6 @@ from app.models.port import Port
 from app.models.project import Project
 from app.models.project_event import EventType, ProjectEvent
 from app.models.project_metrics_daily import ProjectMetricsDaily
-from app.models.project_overview import ProjectOverview
 from app.models.project_star_history import ProjectStarHistory
 
 __all__ = [
@@ -43,7 +42,6 @@ __all__ = [
     "Project",
     "EventType",
     "ProjectEvent",
-    "ProjectOverview",
     "ProjectStarHistory",
     "ProjectMetricsDaily",
 ]

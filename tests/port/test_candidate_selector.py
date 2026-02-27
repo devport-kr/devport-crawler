@@ -24,7 +24,7 @@ def _repo(
 
 def test_selector_preserves_manual_baseline_then_expands() -> None:
     selector = CandidateSelector(
-        SelectionConfig(project_target_min=2, project_target_max=3, diversity_soft_cap=2, now_provider=datetime.now)
+        SelectionConfig(global_target=3, diversity_soft_cap=2, now_provider=datetime.now)
     )
 
     manual = [_repo("manual-1", "baseline/core", stars=12, days_ago=40, topics=("python",))]
@@ -46,7 +46,7 @@ def test_selector_preserves_manual_baseline_then_expands() -> None:
 
 def test_selector_allows_underfill_when_relevant_candidates_are_insufficient() -> None:
     selector = CandidateSelector(
-        SelectionConfig(project_target_min=3, project_target_max=5, diversity_soft_cap=2, now_provider=datetime.now)
+        SelectionConfig(global_target=5, diversity_soft_cap=2, now_provider=datetime.now)
     )
 
     selected = selector.select_candidates(
@@ -66,8 +66,7 @@ def test_selector_allows_underfill_when_relevant_candidates_are_insufficient() -
 def test_selector_uses_soft_diversity_preference_without_hard_organization_limit() -> None:
     selector = CandidateSelector(
         SelectionConfig(
-            project_target_min=3,
-            project_target_max=3,
+            global_target=3,
             diversity_soft_cap=1,
             diversity_penalty=0.45,
             now_provider=datetime.now,

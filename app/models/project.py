@@ -7,14 +7,12 @@ from sqlalchemy import (
     Column,
     Date,
     DateTime,
-    ForeignKey,
     Index,
     Integer,
     String,
     Text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import relationship
 
 from app.config.database import Base
 
@@ -26,7 +24,6 @@ class Project(Base):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     external_id = Column(String(100), unique=True, nullable=False, index=True)
-    port_id = Column(BigInteger, ForeignKey("ports.id"), nullable=False, index=True)
 
     name = Column(String(100), nullable=False)
     full_name = Column(String(200), nullable=False)
@@ -49,10 +46,7 @@ class Project(Base):
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    port = relationship("Port", backref="projects")
-
     __table_args__ = (
-        Index("idx_projects_port_id", "port_id"),
         Index("idx_projects_stars", "stars"),
     )
 

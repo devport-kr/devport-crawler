@@ -22,18 +22,14 @@ class Settings(BaseSettings):
     # GitHub API
     GITHUB_TOKEN: Optional[str] = None
 
-    # Port-domain seed and candidate policy (Phase 4)
-    PORT_TARGET_MIN: int = 15
-    PORT_TARGET_MAX: int = 20
-    PORT_PROJECT_TARGET_MIN: int = 12
-    PORT_PROJECT_TARGET_MAX: int = 20
-    PORT_ALLOW_UNDERFILL: bool = True
-    PORT_SEED_POLICY: str = "hybrid"
+    # Global project limits
+    PORT_PROJECT_GLOBAL_TARGET: int = 1000
 
     PORT_CANDIDATE_WEIGHT_RELEVANCE: float = 0.5
     PORT_CANDIDATE_WEIGHT_STARS: float = 0.3
     PORT_CANDIDATE_WEIGHT_ACTIVITY: float = 0.2
     PORT_CANDIDATE_DIVERSITY_SOFT_CAP: int = 3
+    PORT_CANDIDATE_MIN_STARS: int = 50000
 
     # Port-domain practical full-history caps
     PORT_BACKFILL_FULL_HISTORY: bool = True
@@ -47,7 +43,6 @@ class Settings(BaseSettings):
     PORT_PROJECT_SYNC_HOURS: int = 24
     PORT_EVENT_SYNC_HOURS: int = 24
     PORT_METRICS_SYNC_HOURS: int = 24
-    PORT_OVERVIEW_SYNC_HOURS: int = 24
     PORT_STAR_HISTORY_SYNC_HOURS: int = 24
 
     # Port-domain GitHub client resilience controls
@@ -111,12 +106,11 @@ class Settings(BaseSettings):
     # Discord webhook for failed content fetch notifications
     DISCORD_WEBHOOK_URL: Optional[str] = None
 
-    # Wiki data-readiness gates (Phase 5)
-    WIKI_MIN_STARS_THRESHOLD: int = 100  # Top-star minimum for wiki eligibility
-    WIKI_MIN_12MO_EVENTS: int = 5  # Minimum repository events in last 12 months
-    WIKI_MIN_RELEASES_OR_TAGS: int = 3  # Minimum releases + tags for timeline
-    WIKI_MIN_README_CHARS: int = 500  # Minimum aggregated README/docs length
-    WIKI_HIDE_INCOMPLETE_SECTIONS: bool = True  # Hide sections failing readiness gates
+    # API webhook handoff for crawler completion signals
+    CRAWLER_WEBHOOK_URL: Optional[str] = None
+    CRAWLER_WEBHOOK_SECRET: Optional[str] = None
+    CRAWLER_WEBHOOK_TIMEOUT_SECONDS: float = 10.0
+    CRAWLER_WEBHOOK_MAX_RETRIES: int = 3
 
     class Config:
         env_file = ".env"

@@ -269,7 +269,7 @@ async def crawl_llm_media(background_tasks: BackgroundTasks):
 
 @app.post("/api/crawl/port-sync")
 async def crawl_port_sync(background_tasks: BackgroundTasks, stages: str | None = None, project_ids: str | None = None):
-    """Trigger port-domain daily sync (events/metrics/overviews by default)."""
+    """Trigger port-domain daily sync (events/metrics by default)."""
     parsed_project_ids = parse_project_ids(project_ids)
     logger.info("Port daily sync triggered", extra={"stages": stages, "project_ids": parsed_project_ids})
 
@@ -285,7 +285,7 @@ async def crawl_port_sync(background_tasks: BackgroundTasks, stages: str | None 
     return {
         "status": "started",
         "source": "port_sync",
-        "stages": stages or "events,metrics,overviews",
+        "stages": stages or "events,metrics",
         "project_ids": parsed_project_ids,
         "message": "Port daily sync started in background",
     }
@@ -321,7 +321,7 @@ async def crawl_port_backfill(
     return {
         "status": "started",
         "source": "port_backfill",
-        "stages": stages or "projects,events,star_history,metrics,overviews",
+        "stages": stages or "projects,events,star_history,metrics",
         "project_ids": parsed_project_ids,
         "requested_metrics_days": requested_metrics_days,
         "message": "Port backfill started in background",

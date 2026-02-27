@@ -20,10 +20,6 @@ class ProjectMetricsDaily(Base):
     open_issues = Column(Integer, nullable=True)
     contributors = Column(Integer, nullable=True)
 
-    # Derived rollup-compatible fields for projects table sync.
-    stars_week_delta = Column(Integer, nullable=True)
-    releases_30d = Column(Integer, nullable=True)
-
     project = relationship("Project", backref="metrics_daily")
 
     __table_args__ = (

@@ -37,7 +37,7 @@ async def run_port_daily_sync(
     stages: str | Sequence[str] | None = None,
     project_ids: Sequence[int] | None = None,
 ) -> dict[str, Any]:
-    """Run daily refresh for port events/metrics/overviews by default."""
+    """Run daily refresh for port events/metrics by default."""
     job_orchestrator = orchestrator or PortCrawlerOrchestrator()
     selected_stages = normalize_stage_selector(stages, default=DAILY_DEFAULT_STAGES)
     return await job_orchestrator.run_daily_sync(stages=selected_stages, project_ids=project_ids)
