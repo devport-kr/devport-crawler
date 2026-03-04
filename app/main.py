@@ -10,7 +10,7 @@ from datetime import datetime
 
 from app.config.settings import settings
 from app.orchestrator import CrawlerOrchestrator
-from app.jobs.port_sync import parse_project_ids, run_port_backfill, run_port_daily_sync
+from app.jobs.port_sync import parse_project_ids, run_port_daily_sync
 from app.crawlers.base import RawArticle
 from app.services.summarizer import SummarizerService
 
@@ -69,7 +69,6 @@ async def root():
             "crawl_llm": "POST /api/crawl/llm-rankings",
             "crawl_llm_media": "POST /api/crawl/llm-media",
             "crawl_port_sync": "POST /api/crawl/port-sync",
-            "crawl_port_backfill": "POST /api/crawl/port-backfill",
             "crawl_all": "POST /api/crawl/all",
             "deduplicate": "POST /api/deduplicate",
             "refresh_scores": "POST /api/refresh-scores (HTTP) or {\"source\": \"refresh_scores\"} (Lambda)",
@@ -291,42 +290,6 @@ async def crawl_port_sync(background_tasks: BackgroundTasks, stages: str | None 
     }
 
 
-@app.post("/api/crawl/port-backfill")
-async def crawl_port_backfill(
-    background_tasks: BackgroundTasks,
-    stages: str | None = None,
-    project_ids: str | None = None,
-    requested_metrics_days: int = 3650,
-):
-    """Trigger resumable port-domain backfill with caps/checkpoint reporting."""
-    parsed_project_ids = parse_project_ids(project_ids)
-    logger.info(
-        "Port backfill triggered",
-        extra={"stages": stages, "project_ids": parsed_project_ids, "requested_metrics_days": requested_metrics_days},
-    )
-
-    async def run_backfill() -> None:
-        try:
-            stats = await run_port_backfill(
-                stages=stages,
-                project_ids=parsed_project_ids,
-                requested_metrics_days=requested_metrics_days,
-            )
-            last_stats["port_backfill"] = stats
-            logger.info("Port backfill completed")
-        except Exception as e:
-            logger.error(f"Port backfill failed: {e}", exc_info=True)
-
-    background_tasks.add_task(run_backfill)
-    return {
-        "status": "started",
-        "source": "port_backfill",
-        "stages": stages or "projects,events,star_history,metrics",
-        "project_ids": parsed_project_ids,
-        "requested_metrics_days": requested_metrics_days,
-        "message": "Port backfill started in background",
-    }
-
 
 @app.post("/api/crawl/all")
 async def crawl_all(background_tasks: BackgroundTasks):
@@ -443,7 +406,7 @@ def lambda_handler(event: Dict[str, Any], context: Any):
 
     Expected event format:
     {
-        "source": "github" | "all_blogs" | "llm_rankings" | "refresh_scores" | "port_sync" | "port_backfill",
+        "source": "github" | "all_blogs" | "llm_rankings" | "refresh_scores" | "port_sync",
         "days": 30  # Optional: for refresh_scores only
     }
     """
@@ -498,21 +461,6 @@ def lambda_handler(event: Dict[str, Any], context: Any):
                     )
                 )
                 logger.info(f"Port sync completed: {stats}")
-                return {
-                    "statusCode": 200,
-                    "body": stats,
-                }
-
-            elif source == "port_backfill":
-                stats = asyncio.run(
-                    run_port_backfill(
-                        stages=event.get("stages"),
-                        project_ids=parse_project_ids(event.get("project_ids")),
-                        checkpoints=event.get("checkpoints"),
-                        requested_metrics_days=int(event.get("requested_metrics_days", 3650)),
-                    )
-                )
-                logger.info(f"Port backfill completed: {stats}")
                 return {
                     "statusCode": 200,
                     "body": stats,
