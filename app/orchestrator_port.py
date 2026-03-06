@@ -234,6 +234,9 @@ class PortCrawlerOrchestrator:
                         stats["skipped_event_update"] += 1
                     if result.failure_reasons:
                         stats["failure_reasons"].append({"project": project.full_name, "reasons": result.failure_reasons})
+                    # Write last_release back to the Project row if we got a date
+                    if result.last_release_date is not None:
+                        project.last_release = result.last_release_date
                     db.commit()
                 except Exception as exc:
                     db.rollback()
