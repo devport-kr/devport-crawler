@@ -59,6 +59,9 @@ htmlcov/
 # Playwright
 .playwright/
 
+# Debug output
+debug_output/
+
 # AWS
 .aws-sam/
 
