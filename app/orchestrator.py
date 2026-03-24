@@ -14,7 +14,7 @@ from app.crawlers.hackernews import HackerNewsCrawler
 from app.crawlers.github import GitHubCrawler
 from app.crawlers.llm_rankings import LLMRankingsCrawler
 from app.crawlers.llm_media_rankings import LLMMediaRankingsCrawler
-from app.crawlers.base import RawArticle
+from app.crawlers.base import BaseCrawler, RawArticle, MIN_CONTENT_LENGTH
 from app.services.summarizer import SummarizerService
 from app.services.scorer import ScorerService
 from app.services.deduplicator import DeduplicatorService
@@ -426,9 +426,10 @@ class CrawlerOrchestrator:
 
         Pipeline:
         1. Deduplicate
-        2. Summarize (Korean) and Categorize (LLM does both)
-        3. Calculate score
-        4. Save to database
+        2. Filter out articles with insufficient content
+        3. Summarize (Korean) and Categorize (LLM does both)
+        4. Calculate score
+        5. Save to database
 
         Args:
             articles: List of RawArticles to process
@@ -452,16 +453,35 @@ class CrawlerOrchestrator:
             if not unique_articles:
                 return 0
 
-            # Step 2: Summarize and Categorize (Korean) - LLM does both now
+            # Step 2: Filter out articles with insufficient content
+            articles_to_summarize = []
+            short_content_articles = []
+            for article in unique_articles:
+                if len(article.content or "") >= MIN_CONTENT_LENGTH:
+                    articles_to_summarize.append(article)
+                else:
+                    short_content_articles.append(article)
+
+            if short_content_articles:
+                logger.info(
+                    f"Filtered {len(short_content_articles)} articles with content "
+                    f"< {MIN_CONTENT_LENGTH} chars — sending to Discord"
+                )
+                await self._send_short_content_webhook(short_content_articles)
+
+            if not articles_to_summarize:
+                return 0
+
+            # Step 3: Summarize and Categorize (Korean) - LLM does both now
             # Efficient batching: 2 articles per LLM request, 5 seconds between requests (defaults)
-            summaries = await self.summarizer.summarize_batch(unique_articles)
+            summaries = await self.summarizer.summarize_batch(articles_to_summarize)
             logger.info("Summarization and categorization completed")
 
-            # Step 3: Filter out failed summarizations, non-technical articles, and calculate scores
+            # Step 4: Filter out failed summarizations, non-technical articles, and calculate scores
             scored_articles = []
             failed_count = 0
             non_technical_count = 0
-            for article, summary in zip(unique_articles, summaries):
+            for article, summary in zip(articles_to_summarize, summaries):
                 if summary is None:
                     failed_count += 1
                     logger.warning(f"Skipping article due to failed summarization: {article.title_en}")
@@ -522,26 +542,29 @@ class CrawlerOrchestrator:
                         updated_at=datetime.utcnow()
                     )
 
-                    db.add(db_article)
-                    db.flush()  # Flush to get the article ID
+                    # Use a savepoint so a single article failure (e.g. UniqueViolation) does
+                    # not roll back the entire transaction for the remaining articles.
+                    with db.begin_nested():
+                        db.add(db_article)
+                        db.flush()  # Flush to get the article ID
 
-                    # Save tags to article_tags table if article has tags
-                    if tags:
-                        for tag in tags:
-                            tag_entry = ArticleTag(
-                                article_id=db_article.id,
-                                tag=tag
-                            )
-                            db.merge(tag_entry)  # Use merge to avoid identity map conflicts
+                        # Save tags to article_tags table if article has tags
+                        if tags:
+                            for tag in tags:
+                                tag_entry = ArticleTag(
+                                    article_id=db_article.id,
+                                    tag=tag
+                                )
+                                db.merge(tag_entry)  # Use merge to avoid identity map conflicts
 
                     saved_count += 1
 
                 except Exception as e:
                     logger.error(f"Failed to save article: {e}")
-                    db.rollback()
+                    # Savepoint automatically rolled back; outer transaction remains intact
                     continue
 
-            # Commit all articles and tags
+            # Commit all successfully saved articles and their tags
             db.commit()
             logger.info(f"Saved {saved_count} articles to database")
 
@@ -554,6 +577,33 @@ class CrawlerOrchestrator:
 
         finally:
             db.close()
+
+    async def _send_short_content_webhook(self, articles: list) -> None:
+        """Send short/empty-content articles to Discord for manual admin review."""
+        source_groups: dict[str, list[dict]] = {}
+        for article in articles:
+            raw = article.raw_data
+            if raw.get("hn_id"):
+                source_name = "HackerNews"
+                discussion_url = raw.get("hn_discussion_url")
+            elif raw.get("permalink"):
+                source_name = "Reddit"
+                discussion_url = f"https://www.reddit.com{raw['permalink']}"
+            else:
+                source_name = article.source.capitalize()
+                discussion_url = None
+
+            entry = {
+                "title": article.title_en,
+                "url": article.url,
+                "discussion_url": discussion_url,
+                "upvotes": article.upvotes,
+                "comments": article.comments,
+            }
+            source_groups.setdefault(source_name, []).append(entry)
+
+        for source_name, entries in source_groups.items():
+            await BaseCrawler.send_discord_webhook(source_name, entries)
 
     async def _process_and_save_repositories(self, repos: List[RawArticle]) -> int:
         """

@@ -3,15 +3,24 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 from datetime import datetime
+import asyncio
 import logging
 import re
 import httpx
 from bs4 import BeautifulSoup
+from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
 MIN_CONTENT_LENGTH = 500
+
+# HTTP status codes that warrant a retry (transient server errors / rate limits)
+_RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+
+class _HttpRetryableError(Exception):
+    """Internal signal raised inside _retryable_http_request so tenacity retries on 429/5xx."""
 
 
 class RawArticle:
@@ -102,21 +111,61 @@ class BaseCrawler(ABC):
         self.logger.error(f"Error in {self.__class__.__name__}: {str(error)}", exc_info=True)
 
     @staticmethod
-    def load_existing_urls() -> set[str]:
-        """Load existing article URLs from the database for dedup before expensive retries."""
-        try:
-            from app.config.database import SessionLocal
-            from app.models.article import Article
-            db = SessionLocal()
-            try:
-                urls = {row.url for row in db.query(Article.url).all()}
-                logger.info(f"Loaded {len(urls)} existing URLs for pre-dedup")
-                return urls
-            finally:
-                db.close()
-        except Exception as e:
-            logger.warning(f"Failed to load existing URLs (skipping pre-dedup): {e}")
-            return set()
+    async def _retryable_http_request(
+        method: str,
+        url: str,
+        *,
+        client: httpx.AsyncClient,
+        max_retries: int = None,
+        backoff_base: float = None,
+        backoff_max: float = None,
+        **httpx_kwargs,
+    ) -> httpx.Response:
+        """
+        Make an HTTP request with exponential backoff retry on transient failures.
+
+        Retries on: httpx.TransportError (includes timeouts/network errors), HTTP 429/500/502/503/504.
+        For HTTP 429: reads Retry-After header and waits before retrying.
+        Does NOT retry: HTTP 400/401/403/404/422 (permanent failures).
+
+        Returns the response on success.
+        Raises _HttpRetryableError if all retries are exhausted on 429/5xx.
+        Raises httpx.HTTPStatusError immediately for permanent client errors (non-retryable 4xx).
+        """
+        _max = max_retries if max_retries is not None else getattr(settings, "CRAWLER_HTTP_MAX_RETRIES", 3)
+        _base = backoff_base if backoff_base is not None else getattr(settings, "CRAWLER_HTTP_BACKOFF_BASE_SECONDS", 1.0)
+        _max_wait = backoff_max if backoff_max is not None else getattr(settings, "CRAWLER_HTTP_BACKOFF_MAX_SECONDS", 10.0)
+
+        async for attempt in AsyncRetrying(
+            stop=stop_after_attempt(_max),
+            wait=wait_exponential(multiplier=_base, max=_max_wait),
+            retry=retry_if_exception_type((_HttpRetryableError, httpx.TransportError)),
+            reraise=True,
+        ):
+            with attempt:
+                response = await client.request(method, url, **httpx_kwargs)
+
+                if response.status_code in _RETRYABLE_STATUS_CODES:
+                    if response.status_code == 429:
+                        retry_after = response.headers.get("retry-after") or response.headers.get("Retry-After")
+                        if retry_after:
+                            try:
+                                wait_secs = max(float(retry_after), 0.0)
+                                logger.warning(f"Rate limited (429) by {url}, waiting {wait_secs:.1f}s per Retry-After")
+                                await asyncio.sleep(wait_secs)
+                            except ValueError:
+                                pass
+                        else:
+                            logger.warning(f"Rate limited (429) by {url}, will use exponential backoff")
+                    else:
+                        logger.warning(f"HTTP {response.status_code} from {url}, will retry")
+                    raise _HttpRetryableError(f"HTTP {response.status_code} for {url}")
+
+                response.raise_for_status()
+                return response
+
+        # Unreachable (tenacity reraises), but satisfies the type checker
+        raise _HttpRetryableError(f"All retries exhausted for {url}")
 
     @staticmethod
     async def fetch_url_content(
@@ -183,57 +232,6 @@ class BaseCrawler(ABC):
             return ""
 
     @staticmethod
-    async def fetch_url_content_playwright(url: str, max_chars: int = 15000) -> str:
-        """
-        Retry fetching content using Playwright headless browser.
-
-        Handles JS-rendered pages that httpx can't fetch.
-        Returns extracted text or empty string on failure.
-        """
-        if not url:
-            return ""
-
-        try:
-            from playwright.async_api import async_playwright
-
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=settings.PLAYWRIGHT_HEADLESS)
-                try:
-                    page = await browser.new_page(
-                        user_agent=settings.USER_AGENT,
-                    )
-                    await page.goto(url, wait_until="domcontentloaded", timeout=settings.PLAYWRIGHT_TIMEOUT)
-                    # Give JS a moment to render content
-                    await page.wait_for_timeout(2000)
-
-                    html = await page.content()
-                finally:
-                    await browser.close()
-
-            soup = BeautifulSoup(html, "lxml")
-
-            # Remove non-content elements
-            for tag in soup(["script", "style", "nav", "header", "footer", "aside",
-                             "iframe", "noscript", "form", "button", "svg"]):
-                tag.decompose()
-
-            main = soup.find("article") or soup.find("main") or soup.find("body")
-            if not main:
-                return ""
-
-            text = main.get_text(separator="\n", strip=True)
-            text = re.sub(r"\n{3,}", "\n\n", text)
-
-            if len(text) > max_chars:
-                text = text[:max_chars] + "\n\n[Content truncated]"
-
-            return text
-
-        except Exception as e:
-            logger.debug(f"Playwright fetch failed for {url}: {e}")
-            return ""
-
-    @staticmethod
     async def send_discord_webhook(source_name: str, failed_articles: list[dict]) -> None:
         """
         Send failed article info to Discord webhook.
@@ -265,7 +263,7 @@ class BaseCrawler(ABC):
         # Split into multiple messages to stay under Discord 2000 char limit
         header = (
             f"🔴 **Failed Content Fetches — {source_name}**\n"
-            f"{len(failed_articles)} articles failed after Playwright retry\n"
+            f"{len(failed_articles)} articles with insufficient content for summarization\n"
         )
         messages = []
         current = header

@@ -114,7 +114,6 @@ Requirements:
 - Preserve the author's tone and voice (if opinionated, keep the opinion; if humorous, keep the humor)
 - A Korean reader must be able to fully understand the article without reading the English original
 - Only trim genuinely redundant or repetitive phrasing — NEVER skip entire paragraphs or ideas
-- If content is unavailable (title only), write a brief description based on the title. Do NOT fabricate details.
 
 ### 4. category (string)
 Pick the single best match: AI_LLM, DEVOPS_SRE, INFRA_CLOUD, DATABASE, BLOCKCHAIN, SECURITY, DATA_SCIENCE, ARCHITECTURE, MOBILE, FRONTEND, BACKEND, OTHER
@@ -262,35 +261,49 @@ JSON rules:
     }
 
     async def _summarize_batch_llm(self, articles: list[RawArticle], max_tokens_override: int = None) -> list[Dict[str, str]]:
-        """Call LLM once with multiple articles"""
-        try:
-            prompt = self._build_batch_prompt(articles)
-            tokens = max_tokens_override or self.max_tokens
+        """Call LLM once with multiple articles, with exponential backoff on transient errors."""
+        max_attempts = getattr(settings, "LLM_RETRY_MAX_ATTEMPTS", 3)
+        backoff_base = getattr(settings, "LLM_RETRY_BACKOFF_BASE_SECONDS", 5.0)
+        backoff_max = getattr(settings, "LLM_RETRY_BACKOFF_MAX_SECONDS", 30.0)
 
-            response = await self.openai_client.chat.completions.create(
-                model="gpt-5-nano",
-                messages=[
-                    {"role": "system", "content": self.SYSTEM_MESSAGE},
-                    {"role": "user", "content": prompt}
-                ],
-                max_completion_tokens=min(tokens, 128000),
-                reasoning_effort="low",
-                response_format=self.OPENAI_RESPONSE_SCHEMA
-            )
-            content = response.choices[0].message.content
-            logger.info(
-                f"OpenAI response: finish_reason={response.choices[0].finish_reason}, "
-                f"usage={response.usage}"
-            )
+        prompt = self._build_batch_prompt(articles)
+        tokens = max_tokens_override or self.max_tokens
+        last_error = None
 
-            return self._parse_batch_response(content, articles)
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = await self.openai_client.chat.completions.create(
+                    model="gpt-5-nano",
+                    messages=[
+                        {"role": "system", "content": self.SYSTEM_MESSAGE},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_completion_tokens=min(tokens, 128000),
+                    reasoning_effort="low",
+                    response_format=self.OPENAI_RESPONSE_SCHEMA
+                )
+                content = response.choices[0].message.content
+                logger.info(
+                    f"OpenAI response: finish_reason={response.choices[0].finish_reason}, "
+                    f"usage={response.usage}"
+                )
+                return self._parse_batch_response(content, articles)
 
-        except Exception as e:
-            if self._is_quota_error(e):
-                logger.error(f"LLM quota exceeded: {e}")
-                raise LLMQuotaExceeded(str(e))
-            logger.error(f"Failed to batch summarize {len(articles)} articles: {e}")
-            return [None] * len(articles)
+            except Exception as e:
+                if self._is_quota_error(e):
+                    logger.error(f"LLM quota exceeded: {e}")
+                    raise LLMQuotaExceeded(str(e))
+                last_error = e
+                if attempt < max_attempts:
+                    wait = min(backoff_base * (2 ** (attempt - 1)), backoff_max)
+                    logger.warning(
+                        f"LLM batch failed (attempt {attempt}/{max_attempts}), "
+                        f"retrying in {wait:.1f}s: {e}"
+                    )
+                    await asyncio.sleep(wait)
+
+        logger.error(f"LLM batch failed after {max_attempts} attempts: {last_error}")
+        return [None] * len(articles)
 
     async def summarize_batch(
         self,

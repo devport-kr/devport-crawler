@@ -50,15 +50,16 @@ class HashnodeCrawler(BaseCrawler):
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.post(
+                response = await self._retryable_http_request(
+                    "POST",
                     self.GRAPHQL_URL,
+                    client=client,
                     json={"query": self.QUERY},
                     headers={
                         "User-Agent": self.user_agent,
-                        "Content-Type": "application/json"
-                    }
+                        "Content-Type": "application/json",
+                    },
                 )
-                response.raise_for_status()
                 data = response.json()
 
                 edges = data.get("data", {}).get("feed", {}).get("edges", [])

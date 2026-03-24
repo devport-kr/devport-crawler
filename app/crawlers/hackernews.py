@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import httpx
 from bs4 import BeautifulSoup
 
-from app.crawlers.base import BaseCrawler, RawArticle, MIN_CONTENT_LENGTH
+from app.crawlers.base import BaseCrawler, RawArticle
 from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -37,14 +37,14 @@ class HackerNewsCrawler(BaseCrawler):
         """Fetch top stories from Hacker News"""
         logger.info(f"Starting Hacker News crawl (min_score={self.min_score}, max_age={self.max_age_days}d)")
 
-        # Load existing URLs to skip Playwright retry for already-saved articles
-        self._existing_urls = self.load_existing_urls()
-
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 # Get top story IDs
-                response = await client.get(f"{self.BASE_URL}/topstories.json")
-                response.raise_for_status()
+                response = await self._retryable_http_request(
+                    "GET",
+                    f"{self.BASE_URL}/topstories.json",
+                    client=client,
+                )
                 story_ids = response.json()[:self.max_stories]  # Limit to top N
 
                 logger.info(f"Fetched {len(story_ids)} top story IDs")
@@ -69,24 +69,6 @@ class HackerNewsCrawler(BaseCrawler):
 
                 logger.info(f"Successfully crawled {len(articles)} HN stories")
 
-                # Send Discord webhook for articles that failed content fetch
-                # Only report articles that pass should_skip (high-engagement, recent)
-                failed_articles = []
-                for a in articles:
-                    original_url = a.raw_data.get("original_url", "")
-                    if original_url and len(a.content or "") < MIN_CONTENT_LENGTH and not self.should_skip(a):
-                        failed_articles.append({
-                            "title": a.title_en,
-                            "url": original_url,
-                            "discussion_url": a.raw_data.get("hn_discussion_url"),
-                            "upvotes": a.upvotes,
-                            "comments": a.comments,
-                        })
-
-                if failed_articles:
-                    logger.info(f"{len(failed_articles)} HN articles failed content fetch (< {MIN_CONTENT_LENGTH} chars)")
-                    await self.send_discord_webhook("HackerNews", failed_articles)
-
                 return articles
 
         except Exception as e:
@@ -95,8 +77,12 @@ class HackerNewsCrawler(BaseCrawler):
 
     async def _fetch_story(self, client: httpx.AsyncClient, story_id: int) -> RawArticle:
         """Fetch individual story details and article content"""
-        response = await client.get(f"{self.BASE_URL}/item/{story_id}.json")
-        response.raise_for_status()
+        response = await self._retryable_http_request(
+            "GET",
+            f"{self.BASE_URL}/item/{story_id}.json",
+            client=client,
+            max_retries=2,
+        )
         story = response.json()
 
         if not story:
@@ -107,17 +93,8 @@ class HackerNewsCrawler(BaseCrawler):
 
         # Fetch the actual article content from the linked URL
         content = ""
-        used_playwright = False
         if original_url and "news.ycombinator.com" not in original_url:
             content = await self.fetch_url_content(client, original_url, self.user_agent)
-
-            # Retry with Playwright if content is too short (skip if URL already in DB)
-            if len(content) < MIN_CONTENT_LENGTH and original_url not in self._existing_urls:
-                logger.debug(f"httpx got {len(content)} chars for {original_url}, retrying with Playwright")
-                pw_content = await self.fetch_url_content_playwright(original_url)
-                if len(pw_content) >= MIN_CONTENT_LENGTH:
-                    content = pw_content
-                    used_playwright = True
 
         # For Ask HN / Show HN without external URL, use the HN post text if available
         if not content and story.get("text"):
@@ -141,7 +118,6 @@ class HackerNewsCrawler(BaseCrawler):
                 "hn_discussion_url": discussion_url,
                 "story_type": story.get("type", "story"),
                 "item_type": "DISCUSSION",
-                "used_playwright": used_playwright,
             }
         )
 

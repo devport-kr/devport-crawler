@@ -33,8 +33,12 @@ class GitHubCrawler(BaseCrawler):
                 }
 
                 self.logger.info(f"Fetching {self.TRENDING_URL}")
-                response = await client.get(self.TRENDING_URL, headers=headers)
-                response.raise_for_status()
+                response = await self._retryable_http_request(
+                    "GET",
+                    self.TRENDING_URL,
+                    client=client,
+                    headers=headers,
+                )
 
                 soup = BeautifulSoup(response.text, "html.parser")
 

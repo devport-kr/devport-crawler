@@ -91,8 +91,12 @@ class LLMRankingsCrawler(BaseCrawler):
         self.logger.info(f"Fetching LLM data from {url}")
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(url, headers=headers)
-            response.raise_for_status()
+            response = await self._retryable_http_request(
+                "GET",
+                url,
+                client=client,
+                headers=headers,
+            )
             data = response.json()
 
         # 에러 여부 확인

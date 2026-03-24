@@ -28,15 +28,13 @@ class DevToCrawler(BaseCrawler):
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(
+                response = await self._retryable_http_request(
+                    "GET",
                     self.BASE_URL,
-                    params={
-                        "per_page": 50,
-                        "top": 7
-                    },
-                    headers={"User-Agent": self.user_agent}
+                    client=client,
+                    params={"per_page": 50, "top": 7},
+                    headers={"User-Agent": self.user_agent},
                 )
-                response.raise_for_status()
                 data = response.json()
 
                 for item in data:
@@ -61,12 +59,14 @@ class DevToCrawler(BaseCrawler):
     async def _fetch_full_body(self, client: httpx.AsyncClient, article_id: int) -> str:
         """Fetch full article body markdown from the Dev.to detail API."""
         try:
-            response = await client.get(
+            response = await self._retryable_http_request(
+                "GET",
                 f"{self.BASE_URL}/{article_id}",
+                client=client,
                 headers={"User-Agent": self.user_agent},
                 timeout=15.0,
+                max_retries=2,
             )
-            response.raise_for_status()
             detail = response.json()
             return detail.get("body_markdown") or detail.get("body_html") or ""
         except Exception as e:

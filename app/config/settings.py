@@ -71,10 +71,6 @@ class Settings(BaseSettings):
     MAX_CONCURRENT_REQUESTS: int = 5
     USER_AGENT: str = "DevPortCrawler/1.0 (+https://devport.kr)"
 
-    # Playwright settings
-    PLAYWRIGHT_HEADLESS: bool = True
-    PLAYWRIGHT_TIMEOUT: int = 30000  # milliseconds
-
     # Deduplication
     TITLE_SIMILARITY_THRESHOLD: float = 0.9
 
@@ -102,6 +98,16 @@ class Settings(BaseSettings):
     # Reddit API (optional OAuth; falls back to public if missing)
     REDDIT_CLIENT_ID: Optional[str] = None
     REDDIT_CLIENT_SECRET: Optional[str] = None
+
+    # Crawler HTTP retry policy
+    CRAWLER_HTTP_MAX_RETRIES: int = 3
+    CRAWLER_HTTP_BACKOFF_BASE_SECONDS: float = 1.0
+    CRAWLER_HTTP_BACKOFF_MAX_SECONDS: float = 10.0
+
+    # LLM summarizer retry policy
+    LLM_RETRY_MAX_ATTEMPTS: int = 3
+    LLM_RETRY_BACKOFF_BASE_SECONDS: float = 5.0
+    LLM_RETRY_BACKOFF_MAX_SECONDS: float = 30.0
 
     # Discord webhook for failed content fetch notifications
     DISCORD_WEBHOOK_URL: Optional[str] = None
