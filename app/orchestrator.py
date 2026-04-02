@@ -2,6 +2,7 @@
 
 from typing import List, Dict, Any
 from datetime import datetime
+import asyncio
 import logging
 import uuid
 from sqlalchemy.orm import Session
@@ -35,12 +36,15 @@ class CrawlerOrchestrator:
 
     async def run_all_crawlers(self) -> Dict[str, Any]:
         """
-        Run all blog crawlers sequentially
+        Run all blog crawlers concurrently.
+
+        Each source crawls and processes articles independently via asyncio.gather.
+        DB safety: each _process_and_save_articles call creates its own SessionLocal.
 
         Returns:
             Dictionary with crawling statistics
         """
-        logger.info("Starting all blog crawlers...")
+        logger.info("Starting all blog crawlers (concurrent)...")
 
         stats = {
             "started_at": datetime.utcnow().isoformat(),
@@ -50,7 +54,6 @@ class CrawlerOrchestrator:
             "errors": []
         }
 
-        # Run each crawler
         sources = [
             ("devto", DevToCrawler()),
             ("hashnode", HashnodeCrawler()),
@@ -59,29 +62,40 @@ class CrawlerOrchestrator:
             ("hackernews", HackerNewsCrawler())
         ]
 
-        for source_name, crawler in sources:
+        async def run_source(source_name: str, crawler) -> tuple:
             try:
                 logger.info(f"Running {source_name} crawler...")
                 articles = await crawler.crawl()
                 saved = await self._process_and_save_articles(articles)
-
-                stats["sources"][source_name] = {
+                return source_name, {
                     "crawled": len(articles),
                     "saved": saved,
-                    "success": True
+                    "success": True,
                 }
-                stats["total_crawled"] += len(articles)
-                stats["total_saved"] += saved
-
             except Exception as e:
                 logger.error(f"Error crawling {source_name}: {e}", exc_info=True)
-                stats["sources"][source_name] = {
+                return source_name, {
                     "crawled": 0,
                     "saved": 0,
                     "success": False,
-                    "error": str(e)
+                    "error": str(e),
                 }
-                stats["errors"].append(f"{source_name}: {str(e)}")
+
+        results = await asyncio.gather(
+            *[run_source(name, crawler) for name, crawler in sources],
+            return_exceptions=True,
+        )
+
+        for result in results:
+            if isinstance(result, Exception):
+                stats["errors"].append(str(result))
+                continue
+            source_name, source_stats = result
+            stats["sources"][source_name] = source_stats
+            stats["total_crawled"] += source_stats["crawled"]
+            stats["total_saved"] += source_stats["saved"]
+            if not source_stats["success"]:
+                stats["errors"].append(f"{source_name}: {source_stats.get('error', 'unknown')}")
 
         stats["completed_at"] = datetime.utcnow().isoformat()
         logger.info(f"All crawlers completed. Total saved: {stats['total_saved']}")

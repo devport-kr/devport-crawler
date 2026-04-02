@@ -23,6 +23,12 @@ pydantic==2.12.5
 pydantic-settings==2.12.0
 python-dateutil==2.8.2
 
+# Browser automation (JS-rendered content fallback)
+playwright>=1.52.0
+
+# AWS Lambda Runtime Interface Client
+awslambdaric>=3.0.0
+
 # Utilities
 python-dotenv==1.0.0
 tenacity==8.2.3  # Retry logic

@@ -232,6 +232,63 @@ class BaseCrawler(ABC):
             return ""
 
     @staticmethod
+    async def fetch_url_content_playwright(
+        browser,
+        url: str,
+        timeout_ms: int = 30000,
+        max_chars: int = 15000,
+    ) -> str:
+        """
+        Fetch and extract readable text from a URL using Playwright (JS rendering).
+
+        Creates a new browser page, navigates to the URL, waits for network idle,
+        then extracts text content via JS. Returns empty string on any failure.
+
+        Args:
+            browser: Playwright Browser instance
+            url: article URL to fetch
+            timeout_ms: page load timeout in milliseconds
+            max_chars: max characters to return
+        """
+        if not url:
+            return ""
+
+        page = None
+        try:
+            page = await browser.new_page()
+            await page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+            # Brief extra wait for late-firing JS
+            await page.wait_for_timeout(2000)
+
+            content = await page.evaluate("""() => {
+                const article = document.querySelector('article')
+                    || document.querySelector('main')
+                    || document.body;
+                if (!article) return '';
+                const remove = 'script,style,nav,header,footer,aside,iframe,noscript,form,button,svg';
+                article.querySelectorAll(remove).forEach(el => el.remove());
+                return article.innerText;
+            }""")
+
+            if not content:
+                return ""
+
+            content = re.sub(r"\n{3,}", "\n\n", content)
+            if len(content) > max_chars:
+                content = content[:max_chars] + "\n\n[Content truncated]"
+            return content
+
+        except Exception as e:
+            logger.debug(f"Playwright failed to fetch content from {url}: {e}")
+            return ""
+        finally:
+            if page:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
+
+    @staticmethod
     async def send_discord_webhook(source_name: str, failed_articles: list[dict]) -> None:
         """
         Send failed article info to Discord webhook.

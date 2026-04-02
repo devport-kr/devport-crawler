@@ -95,6 +95,17 @@ class Settings(BaseSettings):
     MAX_STORIES_HACKERNEWS: int = 100  # Number of top stories to fetch
     MAX_AGE_DAYS_HACKERNEWS: int = 7  # Skip stories older than this
 
+    # Concurrency controls
+    LLM_CONCURRENCY: int = 5  # Max concurrent LLM API calls
+    LLM_BATCH_DELAY: float = 1.0  # Stagger delay between concurrent LLM batches (seconds)
+    CONTENT_FETCH_CONCURRENCY: int = 20  # Max concurrent httpx content fetches
+
+    # Playwright (JS-rendered content fallback for HN)
+    PLAYWRIGHT_HEADLESS: bool = True
+    PLAYWRIGHT_TIMEOUT_MS: int = 30000  # Page load timeout
+    PLAYWRIGHT_CONCURRENCY: int = 3  # Max concurrent browser pages
+    MIN_CONTENT_FOR_PLAYWRIGHT: int = 200  # Below this char count, try Playwright fallback
+
     # Reddit API (optional OAuth; falls back to public if missing)
     REDDIT_CLIENT_ID: Optional[str] = None
     REDDIT_CLIENT_SECRET: Optional[str] = None
