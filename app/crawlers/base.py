@@ -13,7 +13,7 @@ from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
-MIN_CONTENT_LENGTH = 500
+MIN_CONTENT_LENGTH = 6000
 
 # HTTP status codes that warrant a retry (transient server errors / rate limits)
 _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
@@ -74,6 +74,26 @@ class BaseCrawler(ABC):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.user_agent = settings.USER_AGENT
         self.delay = settings.CRAWL_DELAY_SECONDS
+
+    async def _launch_browser(self):
+        """Launch Playwright Chromium browser. Returns (browser, playwright) or (None, None)."""
+        try:
+            from playwright.async_api import async_playwright
+            pw = await async_playwright().start()
+            browser = await pw.chromium.launch(
+                headless=settings.PLAYWRIGHT_HEADLESS,
+                args=[
+                    "--disable-gpu",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                ],
+            )
+            logger.info("Playwright browser launched successfully")
+            return browser, pw
+        except Exception as e:
+            logger.warning(f"Playwright not available, falling back to httpx-only: {e}")
+            return None, None
 
     @abstractmethod
     async def crawl(self) -> List[RawArticle]:
@@ -230,6 +250,61 @@ class BaseCrawler(ABC):
         except Exception as e:
             logger.debug(f"Failed to fetch content from {url}: {e}")
             return ""
+
+    @staticmethod
+    async def fetch_url_content_playwright(
+        browser,
+        url: str,
+        timeout_ms: int = 30000,
+        max_chars: int = 15000,
+    ) -> str:
+        """
+        Fetch and extract readable text from a URL using Playwright (JS rendering).
+
+        Creates a new browser page, navigates to the URL, waits for network idle,
+        then extracts text content via JS. Returns empty string on any failure.
+
+        Args:
+            browser: Playwright Browser instance
+            url: article URL to fetch
+            timeout_ms: page load timeout in milliseconds
+            max_chars: max characters to return
+        """
+        if not url:
+            return ""
+
+        page = None
+        try:
+            page = await browser.new_page()
+            await page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+
+            content = await page.evaluate("""() => {
+                const article = document.querySelector('article')
+                    || document.querySelector('main')
+                    || document.body;
+                if (!article) return '';
+                const remove = 'script,style,nav,header,footer,aside,iframe,noscript,form,button,svg';
+                article.querySelectorAll(remove).forEach(el => el.remove());
+                return article.innerText;
+            }""")
+
+            if not content:
+                return ""
+
+            content = re.sub(r"\n{3,}", "\n\n", content)
+            if len(content) > max_chars:
+                content = content[:max_chars] + "\n\n[Content truncated]"
+            return content
+
+        except Exception as e:
+            logger.warning(f"Playwright failed for {url}: {e}")
+            return ""
+        finally:
+            if page:
+                try:
+                    await page.close()
+                except Exception:
+                    pass
 
     @staticmethod
     async def send_discord_webhook(source_name: str, failed_articles: list[dict]) -> None:

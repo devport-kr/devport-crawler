@@ -309,45 +309,70 @@ JSON rules:
         self,
         articles: list[RawArticle],
         batch_size: int = 5,
-        delay: float = 5.0,
-        max_tokens_override: int = None
+        delay: float = None,
+        max_tokens_override: int = None,
+        concurrency: int = None,
     ) -> list[Dict[str, str]]:
         """
-        Summarize multiple articles efficiently by batching them into single LLM requests
+        Summarize multiple articles by batching into LLM requests sent concurrently.
 
-        NOTE: Uses FULL article content and generates comprehensive markdown summaries
-        With OpenAI structured outputs (constrained decoding), 5 articles per batch is safe
-        within the 128k output token limit (typical: ~9k tokens per long article)
+        Uses asyncio.Semaphore to limit concurrent LLM calls and a stagger delay
+        to avoid burst-firing all requests at once.
 
         Args:
             articles: List of RawArticles to summarize
-            batch_size: Number of articles per LLM request (default: 2, reduced for stability)
-            delay: Delay between LLM requests in seconds (default: 5)
+            batch_size: Number of articles per LLM request
+            delay: Stagger delay between batch launches (default from settings)
+            max_tokens_override: Override max tokens per request
+            concurrency: Max concurrent LLM calls (default from settings)
 
         Returns:
             List of summaries (or None for failed articles)
         """
-        summaries = []
+        _concurrency = concurrency or getattr(settings, "LLM_CONCURRENCY", 5)
+        _delay = delay if delay is not None else getattr(settings, "LLM_BATCH_DELAY", 1.0)
+        sem = asyncio.Semaphore(_concurrency)
 
+        # Split articles into batches
+        batches = []
         for i in range(0, len(articles), batch_size):
-            batch = articles[i:i + batch_size]
-            logger.info(f"Processing batch {i//batch_size + 1}: {len(batch)} articles")
+            batches.append(articles[i:i + batch_size])
 
-            # Send all articles in batch to LLM in one request
-            try:
-                batch_summaries = await self._summarize_batch_llm(batch, max_tokens_override=max_tokens_override)
-            except LLMQuotaExceeded:
-                summaries.extend([None] * len(batch))
-                remaining = len(articles) - (i + len(batch))
-                if remaining > 0:
-                    summaries.extend([None] * remaining)
-                logger.error("Aborting remaining batches due to LLM quota exhaustion")
-                break
-            summaries.extend(batch_summaries)
+        if not batches:
+            return []
 
-            # Delay between batches to respect rate limits
-            if i + batch_size < len(articles):
-                await asyncio.sleep(delay)
+        quota_exceeded = asyncio.Event()
+
+        async def process_batch(batch_idx: int, batch: list[RawArticle]) -> list:
+            if quota_exceeded.is_set():
+                return [None] * len(batch)
+
+            async with sem:
+                # Stagger delay to avoid burst
+                if batch_idx > 0:
+                    await asyncio.sleep(_delay * min(batch_idx, _concurrency))
+
+                logger.info(f"Processing batch {batch_idx + 1}/{len(batches)}: {len(batch)} articles")
+                try:
+                    return await self._summarize_batch_llm(batch, max_tokens_override=max_tokens_override)
+                except LLMQuotaExceeded:
+                    quota_exceeded.set()
+                    logger.error("LLM quota exceeded — signalling remaining batches to abort")
+                    return [None] * len(batch)
+
+        results = await asyncio.gather(
+            *[process_batch(i, batch) for i, batch in enumerate(batches)],
+            return_exceptions=True,
+        )
+
+        # Flatten results
+        summaries = []
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error(f"Batch failed with unexpected exception: {result}")
+                summaries.append(None)
+            else:
+                summaries.extend(result)
 
         return summaries
 
