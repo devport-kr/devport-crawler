@@ -85,7 +85,7 @@ class HackerNewsCrawler(BaseCrawler):
                     f"to fetch content for"
                 )
 
-                # Phase 4: Fetch content in parallel with httpx-first / Playwright-fallback
+                # Phase 4: Fetch content — Playwright first, httpx fallback
                 async def fetch_content(article: RawArticle) -> RawArticle:
                     original_url = article.raw_data.get("original_url", "")
 
@@ -93,29 +93,28 @@ class HackerNewsCrawler(BaseCrawler):
                     if not original_url or "news.ycombinator.com" in original_url:
                         return article
 
-                    # Fast path: httpx + BeautifulSoup
-                    async with http_sem:
-                        content = await self.fetch_url_content(
-                            client, original_url, self.user_agent
-                        )
+                    content = ""
 
-                    # Slow path: Playwright fallback if content too short
-                    if (
-                        len(content) < settings.MIN_CONTENT_FOR_PLAYWRIGHT
-                        and browser is not None
-                    ):
+                    # Primary: Playwright with JS rendering
+                    if browser is not None:
                         async with pw_sem:
-                            pw_content = await self.fetch_url_content_playwright(
+                            content = await self.fetch_url_content_playwright(
                                 browser,
                                 original_url,
                                 timeout_ms=settings.PLAYWRIGHT_TIMEOUT_MS,
                             )
-                        if len(pw_content) > len(content):
-                            content = pw_content
+                        if content:
+                            logger.info(f"Playwright got {len(content)} chars from {original_url}")
                             article.raw_data["used_playwright"] = True
-                        else:
-                            article.raw_data["used_playwright"] = False
-                    else:
+
+                    # Fallback: httpx + BeautifulSoup
+                    if not content:
+                        async with http_sem:
+                            content = await self.fetch_url_content(
+                                client, original_url, self.user_agent
+                            )
+                        if content:
+                            logger.info(f"httpx fallback got {len(content)} chars from {original_url}")
                         article.raw_data["used_playwright"] = False
 
                     article.content = content
@@ -150,27 +149,6 @@ class HackerNewsCrawler(BaseCrawler):
                     await pw.stop()
                 except Exception:
                     pass
-
-    async def _launch_browser(self):
-        """Launch Playwright Chromium browser. Returns (browser, playwright) or (None, None)."""
-        try:
-            from playwright.async_api import async_playwright
-            pw = await async_playwright().start()
-            browser = await pw.chromium.launch(
-                headless=settings.PLAYWRIGHT_HEADLESS,
-                args=[
-                    "--disable-gpu",
-                    "--single-process",
-                    "--disable-dev-shm-usage",
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                ],
-            )
-            logger.info("Playwright browser launched successfully")
-            return browser, pw
-        except Exception as e:
-            logger.warning(f"Playwright not available, falling back to httpx-only: {e}")
-            return None, None
 
     async def _fetch_story_metadata(
         self, client: httpx.AsyncClient, story_id: int

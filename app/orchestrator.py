@@ -478,17 +478,16 @@ class CrawlerOrchestrator:
 
             if short_content_articles:
                 logger.info(
-                    f"Filtered {len(short_content_articles)} articles with content "
-                    f"< {MIN_CONTENT_LENGTH} chars — sending to Discord"
+                    f"Dropped {len(short_content_articles)} articles with content "
+                    f"< {MIN_CONTENT_LENGTH} chars"
                 )
-                await self._send_short_content_webhook(short_content_articles)
 
             if not articles_to_summarize:
                 return 0
 
             # Step 3: Summarize and Categorize (Korean) - LLM does both now
             # Efficient batching: 2 articles per LLM request, 5 seconds between requests (defaults)
-            summaries = await self.summarizer.summarize_batch(articles_to_summarize)
+            summaries = await self.summarizer.summarize_batch(articles_to_summarize, batch_size=3)
             logger.info("Summarization and categorization completed")
 
             # Step 4: Filter out failed summarizations, non-technical articles, and calculate scores

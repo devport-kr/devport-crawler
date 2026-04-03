@@ -100,11 +100,11 @@ class Settings(BaseSettings):
     LLM_BATCH_DELAY: float = 1.0  # Stagger delay between concurrent LLM batches (seconds)
     CONTENT_FETCH_CONCURRENCY: int = 20  # Max concurrent httpx content fetches
 
-    # Playwright (JS-rendered content fallback for HN)
+    # Playwright (JS-rendered content fetching for HN & Reddit)
     PLAYWRIGHT_HEADLESS: bool = True
-    PLAYWRIGHT_TIMEOUT_MS: int = 30000  # Page load timeout
-    PLAYWRIGHT_CONCURRENCY: int = 3  # Max concurrent browser pages
-    MIN_CONTENT_FOR_PLAYWRIGHT: int = 200  # Below this char count, try Playwright fallback
+    PLAYWRIGHT_TIMEOUT_MS: int = 15000  # Page load timeout
+    PLAYWRIGHT_CONCURRENCY: int = 5  # Max concurrent browser pages
+    MIN_CONTENT_FOR_PLAYWRIGHT: int = 3000  # Below this char count, try Playwright fallback
 
     # Reddit API (optional OAuth; falls back to public if missing)
     REDDIT_CLIENT_ID: Optional[str] = None
