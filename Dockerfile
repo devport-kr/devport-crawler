@@ -40,5 +40,5 @@ ENV HOME=/tmp
 # Copy application source
 COPY app/ ${FUNCTION_DIR}/app/
 
-ENTRYPOINT [ "/usr/bin/python3", "-m", "awslambdaric" ]
+ENTRYPOINT [ "/usr/local/bin/python3", "-m", "awslambdaric" ]
 CMD [ "app.handler.lambda_handler" ]
