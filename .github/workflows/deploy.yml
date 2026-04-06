@@ -9,7 +9,7 @@ on:
 env:
   AWS_REGION: ap-northeast-2
   ECR_REPOSITORY: devport-prod-crawler
-  LAMBDA_FUNCTION_NAME: devport-prod-crawler
+  LAMBDA_FUNCTIONS: devport-prod-crawler-api devport-prod-crawler-playwright devport-prod-port_sync
 
 permissions:
   id-token: write
@@ -44,12 +44,15 @@ jobs:
 
       - name: Deploy to Lambda
         run: |
-          aws lambda update-function-code \
-            --function-name ${{ env.LAMBDA_FUNCTION_NAME }} \
-            --image-uri ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }} \
-            > /dev/null
-
-          aws lambda wait function-updated \
-            --function-name ${{ env.LAMBDA_FUNCTION_NAME }}
-
-          echo "Deployed: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}"
+          for fn in ${{ env.LAMBDA_FUNCTIONS }}; do
+            echo "Updating $fn..."
+            aws lambda update-function-code \
+              --function-name "$fn" \
+              --image-uri "$IMAGE_URI" \
+              > /dev/null
+          done
+          for fn in ${{ env.LAMBDA_FUNCTIONS }}; do
+            aws lambda wait function-updated --function-name "$fn"
+            echo "Deployed $fn"
+          done
