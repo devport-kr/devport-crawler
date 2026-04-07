@@ -520,7 +520,7 @@ class CrawlerOrchestrator:
                     # Determine item type
                     if article.source == "github":
                         item_type = ItemType.REPO
-                    elif article.source in ["reddit", "hackernews"]:
+                    elif article.source == "reddit" or article.raw_data.get("hn_id"):
                         item_type = ItemType.DISCUSSION
                     else:
                         item_type = ItemType.BLOG

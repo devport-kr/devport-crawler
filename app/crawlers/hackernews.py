@@ -4,6 +4,7 @@ import asyncio
 import logging
 from typing import List, Optional
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 import httpx
 from bs4 import BeautifulSoup
 
@@ -174,10 +175,17 @@ class HackerNewsCrawler(BaseCrawler):
             soup = BeautifulSoup(story["text"], "lxml")
             content = soup.get_text(separator="\n", strip=True)
 
+        # Extract domain from original URL as source, fallback to "hackernews"
+        source = "hackernews"
+        if original_url:
+            parsed = urlparse(original_url)
+            if parsed.netloc:
+                source = parsed.netloc
+
         return RawArticle(
             title_en=story.get("title", ""),
             url=original_url or discussion_url,
-            source="hackernews",
+            source=source,
             published_at=datetime.fromtimestamp(story.get("time", 0)),
             external_id=str(story_id),
             content=content,
