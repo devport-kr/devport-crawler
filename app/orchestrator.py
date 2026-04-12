@@ -19,6 +19,7 @@ from app.crawlers.base import BaseCrawler, RawArticle, MIN_CONTENT_LENGTH
 from app.services.summarizer import SummarizerService
 from app.services.scorer import ScorerService
 from app.services.deduplicator import DeduplicatorService
+from app.services.webhook_dispatcher import dispatch_completion_webhook
 from app.models.article import Article, ItemType, Category
 from app.models.article_tag import ArticleTag
 from app.models.git_repo import GitRepo
@@ -127,6 +128,17 @@ class CrawlerOrchestrator:
             stats["crawled"] = len(repos)
             stats["saved"] = saved
             stats["success"] = True
+
+            # Notify Spring API to invalidate GIT_REPO caches after the
+            # snapshot has been committed. Only dispatched on success so a
+            # failed crawl doesn't evict caches pointing at good data.
+            webhook_result = await dispatch_completion_webhook(
+                scope="GIT_REPO",
+                job_id=f"github-{stats['started_at']}",
+                completed_at=datetime.utcnow().isoformat(),
+            )
+            if webhook_result is not None:
+                stats["webhook"] = webhook_result
 
         except Exception as e:
             logger.error(f"Error crawling GitHub: {e}", exc_info=True)
@@ -620,97 +632,106 @@ class CrawlerOrchestrator:
 
     async def _process_and_save_repositories(self, repos: List[RawArticle]) -> int:
         """
-        Process GitHub repos and save to git_repos table
+        Mirror github.com/trending into the git_repos table.
 
-        Pipeline:
-        1. Deduplicate by URL
-        2. Summarize (Korean title + description) and Categorize (LLM does both)
-        3. Calculate score
-        4. Save to git_repos table
+        Snapshot semantics: after this call, git_repos equals the set of
+        repos returned by the scrape. New URLs are summarized+inserted,
+        existing URLs have metrics refreshed, and rows no longer on
+        trending are removed.
 
-        Args:
-            repos: List of RawArticles representing GitHub repos
-
-        Returns:
-            Number of repositories saved
+        Returns the number of rows inserted + updated.
         """
+        # Empty-crawl guard: do NOT wipe the table if the scraper returned
+        # nothing (HTML change, network failure, GitHub block).
         if not repos:
-            logger.info("No repositories to process")
+            logger.info("No repositories crawled — skipping DB update to preserve existing snapshot")
             return 0
 
-        logger.info(f"Processing {len(repos)} repositories...")
+        # Intra-batch dedup by URL, keep first occurrence
+        crawled_by_url: Dict[str, RawArticle] = {}
+        for r in repos:
+            crawled_by_url.setdefault(r.url, r)
+        crawled_urls = set(crawled_by_url.keys())
+
+        logger.info(f"Processing {len(crawled_by_url)} trending repositories...")
 
         db = SessionLocal()
         try:
-            # Step 1: Deduplicate by URL
-            existing_urls = {r.url for r in db.query(GitRepo.url).all()}
-            unique_repos = [r for r in repos if r.url not in existing_urls]
-            logger.info(f"After deduplication: {len(unique_repos)} unique repositories")
+            existing_rows = {
+                row.url: row
+                for row in db.query(GitRepo).filter(GitRepo.url.in_(crawled_urls)).all()
+            }
 
-            if not unique_repos:
-                return 0
+            new_repos = [r for url, r in crawled_by_url.items() if url not in existing_rows]
+            existing_pairs = [(existing_rows[url], crawled_by_url[url]) for url in existing_rows]
 
-            # Step 2: Summarize and Categorize (Korean) - LLM does both
-            summaries = await self.summarizer.summarize_batch(unique_repos)
-            logger.info("Summarization and categorization completed")
+            logger.info(
+                f"Snapshot diff: new={len(new_repos)}, existing={len(existing_pairs)}"
+            )
 
-            # Step 3: Filter out failed summarizations, non-technical repos, and calculate scores
-            scored_repos = []
-            failed_count = 0
-            non_technical_count = 0
-            for repo, summary in zip(unique_repos, summaries):
+            # Summarize only new URLs (costly LLM call)
+            summaries = await self.summarizer.summarize_batch(new_repos) if new_repos else []
+
+            inserted = 0
+            failed_summary = 0
+            non_technical = 0
+            for repo, summary in zip(new_repos, summaries):
                 if summary is None:
-                    failed_count += 1
-                    logger.warning(f"Skipping repo due to failed summarization: {repo.title_en}")
+                    failed_summary += 1
                     continue
-
-                # Skip non-developer-relevant repos
                 if not summary.get("is_technical", False):
-                    non_technical_count += 1
-                    logger.info(f"Skipping non-developer-relevant repo: {repo.title_en}")
+                    non_technical += 1
                     continue
 
-                # Get category from LLM response
                 category = self._normalize_category(summary.get("category", "OTHER"))
                 score = self.scorer.calculate_score(repo)
-                scored_repos.append((repo, category, summary, score))
 
-            logger.info(f"Scoring completed. {failed_count} failed summarizations, {non_technical_count} non-developer-relevant repos skipped")
+                db.add(GitRepo(
+                    full_name=repo.title_en,
+                    url=repo.url,
+                    description=repo.content,
+                    language=repo.language,
+                    stars=repo.stars or 0,
+                    forks=repo.raw_data.get("forks", 0),
+                    stars_this_week=repo.raw_data.get("stars_this_week", 0),
+                    summary_ko_title=summary.get("title_ko", repo.title_en[:100]),
+                    summary_ko_body=summary.get("summary_ko"),
+                    category=category,
+                    score=score,
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                ))
+                inserted += 1
 
-            # Step 4: Save to git_repos table
-            saved_count = 0
-            for repo, category, summary, score in scored_repos:
-                try:
-                    # Create GitRepo model
-                    db_repo = GitRepo(
-                        full_name=repo.title_en,
-                        url=repo.url,
-                        description=repo.content,
-                        language=repo.language,
-                        stars=repo.stars or 0,
-                        forks=repo.raw_data.get("forks", 0),
-                        stars_this_week=repo.raw_data.get("stars_this_week", 0),
-                        summary_ko_title=summary.get("title_ko", repo.title_en[:100]),
-                        summary_ko_body=summary.get("summary_ko"),
-                        category=category,
-                        score=score,
-                        created_at=datetime.utcnow(),
-                        updated_at=datetime.utcnow()
-                    )
+            # Refresh metrics on existing rows; preserve Korean summary + category
+            updated = 0
+            now = datetime.utcnow()
+            for row, fresh in existing_pairs:
+                row.stars = fresh.stars or 0
+                row.forks = fresh.raw_data.get("forks", 0)
+                row.stars_this_week = fresh.raw_data.get("stars_this_week", 0)
+                if fresh.content:
+                    row.description = fresh.content
+                if fresh.language:
+                    row.language = fresh.language
+                if fresh.title_en:
+                    row.full_name = fresh.title_en
+                row.score = self.scorer.calculate_score(fresh)
+                row.updated_at = now
+                updated += 1
 
-                    db.add(db_repo)
-                    saved_count += 1
+            # Remove rows that are no longer on trending
+            deleted = db.query(GitRepo).filter(
+                ~GitRepo.url.in_(crawled_urls)
+            ).delete(synchronize_session=False)
 
-                except Exception as e:
-                    logger.error(f"Failed to save repository: {e}")
-                    db.rollback()
-                    continue
-
-            # Commit all repositories
             db.commit()
-            logger.info(f"Saved {saved_count} repositories to database")
-
-            return saved_count
+            logger.info(
+                f"git_repos snapshot updated: inserted={inserted}, updated={updated}, "
+                f"deleted={deleted}, skipped_failed_summary={failed_summary}, "
+                f"skipped_non_technical={non_technical}"
+            )
+            return inserted + updated
 
         except Exception as e:
             logger.error(f"Error processing repositories: {e}", exc_info=True)
