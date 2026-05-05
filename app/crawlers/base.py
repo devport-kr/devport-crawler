@@ -164,38 +164,25 @@ class BaseCrawler(ABC):
             browser = await pw.chromium.launch(
                 headless=settings.PLAYWRIGHT_HEADLESS,
                 args=[
-                    # Sandbox/security must be off in Lambda (no setuid root)
+                    # Sandbox off — Lambda runs without setuid root capability
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
-                    # GPU is unavailable in Lambda; software rasterizer for canvas
+                    # GPU unavailable in Lambda
                     "--disable-gpu",
                     "--disable-accelerated-2d-canvas",
-                    # /dev/shm is only 64 MB in Lambda; redirect to /tmp via this flag
+                    # /dev/shm only 64 MB in Lambda; redirect to disk
                     "--disable-dev-shm-usage",
-                    # CRITICAL for Lambda: collapse all child processes (renderer,
-                    # GPU, utility) into the browser process. Lambda's restricted
-                    # PID namespace and exec policy makes child process spawning
-                    # unreliable — without these flags the browser launches but
-                    # dies the moment new_page() needs a renderer, surfacing as
-                    # "Target page, context or browser has been closed".
-                    "--single-process",
-                    "--no-zygote",
-                    # Reduce noise / IPC traffic Chromium does for nothing useful here
+                    # NOTE: --single-process / --no-zygote intentionally OMITTED.
+                    # The Microsoft Playwright base image provides a proper
+                    # process environment that supports Chromium's normal
+                    # multi-process model. Single-process mode would let the
+                    # browser launch but break concurrent new_page() calls
+                    # (CDP target race → "Target page closed").
                     "--disable-background-networking",
                     "--disable-background-timer-throttling",
                     "--disable-renderer-backgrounding",
                     "--disable-backgrounding-occluded-windows",
-                    "--disable-features=AudioServiceOutOfProcess,IsolateOrigins,site-per-process",
-                    "--disable-component-update",
-                    "--disable-default-apps",
-                    "--disable-hang-monitor",
-                    "--disable-ipc-flooding-protection",
-                    "--disable-sync",
-                    "--metrics-recording-only",
                     "--mute-audio",
-                    "--no-default-browser-check",
-                    "--no-first-run",
-                    "--no-pings",
                 ],
             )
 
