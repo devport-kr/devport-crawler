@@ -75,6 +75,79 @@ class BaseCrawler(ABC):
         self.user_agent = settings.USER_AGENT
         self.delay = settings.CRAWL_DELAY_SECONDS
 
+    async def _diagnose_chromium_failure(self):
+        """
+        One-shot diagnostic: locate the Playwright Chromium binary and run it
+        with --version + --no-sandbox + --headless. Capture stderr so we can
+        see the actual reason Chromium is dying in Lambda (missing lib name,
+        segfault, /dev/shm error, etc).
+        """
+        import asyncio as _asyncio
+        import os
+        import glob
+
+        try:
+            browsers_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/ms-playwright")
+            candidates = (
+                glob.glob(f"{browsers_path}/chromium-*/chrome-linux/headless_shell")
+                + glob.glob(f"{browsers_path}/chromium_headless_shell-*/chrome-linux/headless_shell")
+                + glob.glob(f"{browsers_path}/chromium-*/chrome-linux/chrome")
+            )
+            logger.error(f"DIAG: PLAYWRIGHT_BROWSERS_PATH={browsers_path}, candidates={candidates}")
+            if not candidates:
+                logger.error(f"DIAG: no chromium binary found under {browsers_path}")
+                # List what IS there
+                if os.path.isdir(browsers_path):
+                    for entry in os.listdir(browsers_path):
+                        logger.error(f"DIAG:   {browsers_path}/{entry}")
+                return
+
+            chrome_bin = candidates[0]
+            logger.error(f"DIAG: testing {chrome_bin}")
+
+            # Run with --version (lightweight) and capture stderr
+            proc = await _asyncio.create_subprocess_exec(
+                chrome_bin,
+                "--version",
+                "--no-sandbox",
+                "--headless",
+                "--disable-gpu",
+                stdout=_asyncio.subprocess.PIPE,
+                stderr=_asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await _asyncio.wait_for(proc.communicate(), timeout=10.0)
+                logger.error(
+                    f"DIAG: chromium exit={proc.returncode}, "
+                    f"stdout={stdout.decode(errors='replace')[:500]!r}, "
+                    f"stderr={stderr.decode(errors='replace')[:2000]!r}"
+                )
+            except _asyncio.TimeoutError:
+                proc.kill()
+                logger.error("DIAG: chromium --version hung for 10s")
+
+            # Also run ldd to find any missing libs
+            try:
+                ldd = await _asyncio.create_subprocess_exec(
+                    "ldd", chrome_bin,
+                    stdout=_asyncio.subprocess.PIPE,
+                    stderr=_asyncio.subprocess.PIPE,
+                )
+                stdout, _ = await _asyncio.wait_for(ldd.communicate(), timeout=5.0)
+                missing = [
+                    line for line in stdout.decode(errors="replace").splitlines()
+                    if "not found" in line
+                ]
+                if missing:
+                    logger.error(f"DIAG: missing libs:\n" + "\n".join(missing))
+                else:
+                    logger.error("DIAG: ldd reports all libs resolved")
+            except Exception as e:
+                logger.error(f"DIAG: ldd failed: {e}")
+
+        except Exception as e:
+            logger.error(f"DIAG: diagnostic itself failed: {e}", exc_info=True)
+
     async def _launch_browser(self):
         """
         Launch Playwright Chromium. Returns (browser, playwright) or (None, None).
@@ -112,6 +185,9 @@ class BaseCrawler(ABC):
                     f"Browser launched but smoke test failed (Chromium dead): {smoke_err}. "
                     f"Falling back to httpx-only for this crawl."
                 )
+                # Diagnostic: run the chromium binary directly and capture stderr
+                # so we can see WHY it's dying (missing lib, segfault, etc).
+                await self._diagnose_chromium_failure()
                 try:
                     await browser.close()
                 except Exception:
