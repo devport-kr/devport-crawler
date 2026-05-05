@@ -200,6 +200,7 @@ class BaseCrawler(ABC):
                     "--mute-audio",
                     "--no-first-run",
                     "--no-default-browser-check",
+                    f"--user-agent={settings.PLAYWRIGHT_USER_AGENT}",
                 ],
             )
 
@@ -209,6 +210,7 @@ class BaseCrawler(ABC):
             # fails when asked to create a second page target.
             try:
                 self._playwright_page = await browser.new_page()
+                await self._configure_playwright_page(self._playwright_page)
                 await self._playwright_page.goto(
                     "data:text/html,<title>smoke</title>",
                     wait_until="domcontentloaded",
@@ -420,25 +422,50 @@ class BaseCrawler(ABC):
             return ""
 
         async with self._playwright_page_lock:
+            page = None
             try:
                 page = self._playwright_page
                 if page is None or page.is_closed():
                     page = await browser.new_page()
+                    await self._configure_playwright_page(page)
                     self._playwright_page = page
 
-                # domcontentloaded > networkidle on Lambda: most modern sites
-                # never reach networkidle (analytics, ads, polling) and the page
-                # just hangs until timeout, holding Chromium resources hostage.
-                await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                await self._reset_playwright_page(page)
+
+                # Use "commit" for the navigation itself. Some sites keep
+                # DOMContentLoaded hostage behind redirects, H2 errors, ad
+                # scripts, or SPA boot work; with a reused single page that can
+                # leave a stale navigation active and interrupt the next URL.
+                await page.goto(url, wait_until="commit", timeout=timeout_ms)
+
+                try:
+                    await page.wait_for_load_state(
+                        "domcontentloaded",
+                        timeout=min(timeout_ms, 5000),
+                    )
+                except Exception:
+                    pass
+
+                # Give client-rendered pages a small window to populate <main>.
+                await page.wait_for_timeout(750)
 
                 content = await page.evaluate("""() => {
-                const article = document.querySelector('article')
-                    || document.querySelector('main')
-                    || document.body;
-                if (!article) return '';
                 const remove = 'script,style,nav,header,footer,aside,iframe,noscript,form,button,svg';
-                article.querySelectorAll(remove).forEach(el => el.remove());
-                return article.innerText;
+                const nodes = [
+                    ...document.querySelectorAll('article'),
+                    ...document.querySelectorAll('main'),
+                    document.body,
+                ].filter(Boolean);
+
+                const texts = nodes.map((node) => {
+                    const clone = node.cloneNode(true);
+                    clone.querySelectorAll(remove).forEach(el => el.remove());
+                    return (clone.innerText || '').trim();
+                }).filter(Boolean);
+
+                const useful = texts.find(text => text.length >= 300);
+                if (useful) return useful;
+                return texts.sort((a, b) => b.length - a.length)[0] || '';
             }""")
 
                 if not content:
@@ -452,6 +479,26 @@ class BaseCrawler(ABC):
             except Exception as e:
                 logger.warning(f"Playwright failed for {url}: {e}")
                 return ""
+            finally:
+                if page is not None and not page.is_closed():
+                    await self._reset_playwright_page(page)
+
+    @staticmethod
+    async def _configure_playwright_page(page) -> None:
+        """Apply browser-page defaults that reduce CDN/headless rejects."""
+        await page.set_extra_http_headers({"Accept-Language": "en-US,en;q=0.9"})
+
+    @staticmethod
+    async def _reset_playwright_page(page) -> None:
+        """Stop any in-flight navigation and return the reused page to blank."""
+        try:
+            await page.evaluate("window.stop()")
+        except Exception:
+            pass
+        try:
+            await page.goto("about:blank", wait_until="commit", timeout=3000)
+        except Exception:
+            pass
 
     @staticmethod
     async def send_discord_webhook(source_name: str, failed_articles: list[dict]) -> None:

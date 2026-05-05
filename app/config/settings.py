@@ -103,6 +103,11 @@ class Settings(BaseSettings):
     # Playwright (JS-rendered content fetching for HN & Reddit)
     PLAYWRIGHT_HEADLESS: bool = True
     PLAYWRIGHT_TIMEOUT_MS: int = 15000  # Page load timeout
+    PLAYWRIGHT_USER_AGENT: str = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/141.0.0.0 Safari/537.36"
+    )
     # Sequential page opens — required when using --single-process Chromium.
     # Multi-target CDP requests under single-process race and fail.
     PLAYWRIGHT_CONCURRENCY: int = 1
