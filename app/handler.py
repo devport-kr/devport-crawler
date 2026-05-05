@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+import shutil
+from pathlib import Path
 from typing import Any, Dict
 
 from app.orchestrator import CrawlerOrchestrator
@@ -25,6 +27,32 @@ def _get_orchestrator():
     return _orchestrator
 
 
+def _cleanup_chromium_tmp() -> None:
+    """
+    Wipe Chromium artifacts left in /tmp by warm Lambda invocations.
+
+    Sparticuz/chromium issue #231 documents /tmp filling up across warm invokes
+    until new Chromium launches fail with ERR_INSUFFICIENT_RESOURCES, surfacing
+    as "Target page, context or browser has been closed" on the next run.
+    """
+    for pattern in (
+        ".org.chromium.Chromium.*",
+        "playwright_chromiumdev_*",
+        "playwright_chromium_*",
+        "puppeteer_dev_chrome_profile-*",
+        ".com.google.Chrome.*",
+        "core.*",  # crash dumps
+    ):
+        for path in Path("/tmp").glob(pattern):
+            try:
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    path.unlink(missing_ok=True)
+            except Exception as e:
+                logger.debug(f"Could not remove {path}: {e}")
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
     AWS Lambda handler for EventBridge-scheduled and manually-invoked crawls.
@@ -40,6 +68,11 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         refresh_scores, port_sync
     """
     logger.info(f"Lambda invoked with event: {event}")
+
+    # Clean up Chromium leftovers from prior warm invocations before launching
+    # a fresh browser. Cheap (Path.glob over /tmp) and only relevant for
+    # Playwright-using sources, but safe to always run.
+    _cleanup_chromium_tmp()
 
     source = event.get("source", "all_blogs")
 

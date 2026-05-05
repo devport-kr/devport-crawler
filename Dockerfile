@@ -18,21 +18,21 @@ WORKDIR ${FUNCTION_DIR}
 # Copy awslambdaric from build stage
 COPY --from=build-image ${FUNCTION_DIR} ${FUNCTION_DIR}
 
-# Install Playwright system dependencies + Chromium
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 \
-    libdbus-1-3 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 \
-    libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2 \
-    libwayland-client0 fonts-liberation fonts-noto-color-emoji \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Python dependencies
+# Install Python dependencies first so playwright is available for install-deps
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install only Chromium (skip Firefox/WebKit to reduce image size)
+# Let Playwright install its own canonical system dependency list.
+# This avoids drift between hand-maintained apt list and what Chromium actually
+# needs on Debian 12 arm64 (libxshmfence1, libxext6, libxrender1, libxtst6,
+# libxss1, libx11-xcb1, libxcb-dri3-0, libgles2 etc).
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-RUN playwright install chromium
+RUN apt-get update \
+    && playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
+
+# Lambda's sbx_user must be able to read browser binaries
+RUN chmod -R o+rx /ms-playwright
 
 # Lambda needs a writable HOME for Chromium user data
 ENV HOME=/tmp

@@ -76,7 +76,15 @@ class BaseCrawler(ABC):
         self.delay = settings.CRAWL_DELAY_SECONDS
 
     async def _launch_browser(self):
-        """Launch Playwright Chromium browser. Returns (browser, playwright) or (None, None)."""
+        """
+        Launch Playwright Chromium. Returns (browser, playwright) or (None, None).
+
+        On Lambda the browser handle can be returned successfully even though the
+        underlying Chromium subprocess died seconds later (OOM, /tmp full, missing
+        lib). We do a smoke test by opening + closing one page; if that fails the
+        whole crawl falls back to httpx-only instead of issuing 80 doomed page
+        opens that all error with "Target page, context or browser has been closed".
+        """
         try:
             from playwright.async_api import async_playwright
             pw = await async_playwright().start()
@@ -87,9 +95,31 @@ class BaseCrawler(ABC):
                     "--disable-dev-shm-usage",
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
+                    "--disable-features=AudioServiceOutOfProcess,IsolateOrigins,site-per-process",
+                    "--disable-background-networking",
+                    "--disable-renderer-backgrounding",
+                    "--disable-backgrounding-occluded-windows",
+                    "--mute-audio",
                 ],
             )
-            logger.info("Playwright browser launched successfully")
+
+            # Smoke test: prove Chromium subprocess is actually alive
+            try:
+                test_page = await browser.new_page()
+                await test_page.close()
+            except Exception as smoke_err:
+                logger.error(
+                    f"Browser launched but smoke test failed (Chromium dead): {smoke_err}. "
+                    f"Falling back to httpx-only for this crawl."
+                )
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+                await pw.stop()
+                return None, None
+
+            logger.info("Playwright browser launched and smoke-tested successfully")
             return browser, pw
         except Exception as e:
             logger.warning(f"Playwright not available, falling back to httpx-only: {e}")
@@ -273,10 +303,18 @@ class BaseCrawler(ABC):
         if not url:
             return ""
 
+        # Fail fast if Chromium has died — avoids 80 simultaneous page opens
+        # all hitting "Target page, context or browser has been closed".
+        if not browser.is_connected():
+            return ""
+
         page = None
         try:
             page = await browser.new_page()
-            await page.goto(url, wait_until="networkidle", timeout=timeout_ms)
+            # domcontentloaded > networkidle on Lambda: most modern sites
+            # never reach networkidle (analytics, ads, polling) and the page
+            # just hangs until timeout, holding Chromium resources hostage.
+            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
 
             content = await page.evaluate("""() => {
                 const article = document.querySelector('article')
