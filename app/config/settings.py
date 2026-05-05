@@ -103,7 +103,9 @@ class Settings(BaseSettings):
     # Playwright (JS-rendered content fetching for HN & Reddit)
     PLAYWRIGHT_HEADLESS: bool = True
     PLAYWRIGHT_TIMEOUT_MS: int = 15000  # Page load timeout
-    PLAYWRIGHT_CONCURRENCY: int = 5  # Max concurrent browser pages
+    # Sequential page opens — required when using --single-process Chromium.
+    # Multi-target CDP requests under single-process race and fail.
+    PLAYWRIGHT_CONCURRENCY: int = 1
     MIN_CONTENT_FOR_PLAYWRIGHT: int = 3000  # Below this char count, try Playwright fallback
 
     # Reddit API (optional OAuth; falls back to public if missing)

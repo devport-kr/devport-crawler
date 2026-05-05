@@ -161,28 +161,43 @@ class BaseCrawler(ABC):
         try:
             from playwright.async_api import async_playwright
             pw = await async_playwright().start()
+            # Force full chrome binary instead of chrome-headless-shell.
+            # headless_shell is a stripped Chromium that has known broken
+            # behavior under Lambda's restricted runtime (page targets fail
+            # to instantiate). The full chrome binary is heavier but more
+            # tolerant of unusual environments.
+            import glob as _glob
+            chrome_candidates = (
+                _glob.glob("/ms-playwright/chromium-*/chrome-linux/chrome")
+                + _glob.glob("/ms-playwright/chromium_headless_shell-*/chrome-linux/headless_shell")
+            )
+            chrome_path = chrome_candidates[0] if chrome_candidates else None
+
             browser = await pw.chromium.launch(
+                executable_path=chrome_path,
                 headless=settings.PLAYWRIGHT_HEADLESS,
                 args=[
-                    # Sandbox off — Lambda runs without setuid root capability
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
-                    # GPU unavailable in Lambda
                     "--disable-gpu",
                     "--disable-accelerated-2d-canvas",
-                    # /dev/shm only 64 MB in Lambda; redirect to disk
                     "--disable-dev-shm-usage",
-                    # NOTE: --single-process / --no-zygote intentionally OMITTED.
-                    # The Microsoft Playwright base image provides a proper
-                    # process environment that supports Chromium's normal
-                    # multi-process model. Single-process mode would let the
-                    # browser launch but break concurrent new_page() calls
-                    # (CDP target race → "Target page closed").
+                    # CRITICAL for Lambda: Chromium's multi-process model breaks
+                    # under Lambda's PID namespace. --single-process collapses
+                    # everything into the browser process. Combined with
+                    # PLAYWRIGHT_CONCURRENCY=1 to avoid the multi-target race
+                    # that single-process Chromium can't handle.
+                    "--single-process",
+                    "--no-zygote",
+                    "--in-process-gpu",
                     "--disable-background-networking",
                     "--disable-background-timer-throttling",
                     "--disable-renderer-backgrounding",
                     "--disable-backgrounding-occluded-windows",
+                    "--disable-features=AudioServiceOutOfProcess,IsolateOrigins,site-per-process",
                     "--mute-audio",
+                    "--no-first-run",
+                    "--no-default-browser-check",
                 ],
             )
 
