@@ -74,6 +74,8 @@ class BaseCrawler(ABC):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.user_agent = settings.USER_AGENT
         self.delay = settings.CRAWL_DELAY_SECONDS
+        self._playwright_page = None
+        self._playwright_page_lock = asyncio.Lock()
 
     async def _diagnose_chromium_failure(self):
         """
@@ -201,10 +203,17 @@ class BaseCrawler(ABC):
                 ],
             )
 
-            # Smoke test: prove Chromium subprocess is actually alive
+            # Smoke test: prove Chromium can create a page target, then keep
+            # that page open for reuse. In Lambda-compatible --single-process
+            # mode, Chromium reliably supports navigating one existing page but
+            # fails when asked to create a second page target.
             try:
-                test_page = await browser.new_page()
-                await test_page.close()
+                self._playwright_page = await browser.new_page()
+                await self._playwright_page.goto(
+                    "data:text/html,<title>smoke</title>",
+                    wait_until="domcontentloaded",
+                    timeout=5000,
+                )
             except Exception as smoke_err:
                 logger.error(
                     f"Browser launched but smoke test failed (Chromium dead): {smoke_err}. "
@@ -382,8 +391,8 @@ class BaseCrawler(ABC):
             logger.debug(f"Failed to fetch content from {url}: {e}")
             return ""
 
-    @staticmethod
     async def fetch_url_content_playwright(
+        self,
         browser,
         url: str,
         timeout_ms: int = 30000,
@@ -392,8 +401,9 @@ class BaseCrawler(ABC):
         """
         Fetch and extract readable text from a URL using Playwright (JS rendering).
 
-        Creates a new browser page, navigates to the URL, waits for network idle,
-        then extracts text content via JS. Returns empty string on any failure.
+        Reuses the single Playwright page created during browser smoke test,
+        navigates to the URL, then extracts text content via JS. Returns empty
+        string on any failure.
 
         Args:
             browser: Playwright Browser instance
@@ -409,15 +419,19 @@ class BaseCrawler(ABC):
         if not browser.is_connected():
             return ""
 
-        page = None
-        try:
-            page = await browser.new_page()
-            # domcontentloaded > networkidle on Lambda: most modern sites
-            # never reach networkidle (analytics, ads, polling) and the page
-            # just hangs until timeout, holding Chromium resources hostage.
-            await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        async with self._playwright_page_lock:
+            try:
+                page = self._playwright_page
+                if page is None or page.is_closed():
+                    page = await browser.new_page()
+                    self._playwright_page = page
 
-            content = await page.evaluate("""() => {
+                # domcontentloaded > networkidle on Lambda: most modern sites
+                # never reach networkidle (analytics, ads, polling) and the page
+                # just hangs until timeout, holding Chromium resources hostage.
+                await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+
+                content = await page.evaluate("""() => {
                 const article = document.querySelector('article')
                     || document.querySelector('main')
                     || document.body;
@@ -427,23 +441,17 @@ class BaseCrawler(ABC):
                 return article.innerText;
             }""")
 
-            if not content:
+                if not content:
+                    return ""
+
+                content = re.sub(r"\n{3,}", "\n\n", content)
+                if len(content) > max_chars:
+                    content = content[:max_chars] + "\n\n[Content truncated]"
+                return content
+
+            except Exception as e:
+                logger.warning(f"Playwright failed for {url}: {e}")
                 return ""
-
-            content = re.sub(r"\n{3,}", "\n\n", content)
-            if len(content) > max_chars:
-                content = content[:max_chars] + "\n\n[Content truncated]"
-            return content
-
-        except Exception as e:
-            logger.warning(f"Playwright failed for {url}: {e}")
-            return ""
-        finally:
-            if page:
-                try:
-                    await page.close()
-                except Exception:
-                    pass
 
     @staticmethod
     async def send_discord_webhook(source_name: str, failed_articles: list[dict]) -> None:
