@@ -10,7 +10,7 @@
 ARG LAMBDA_TASK_ROOT="/var/task"
 
 # Stage 1: Build — install awslambdaric (needs C++ toolchain)
-FROM --platform=linux/arm64 mcr.microsoft.com/playwright/python:v1.56.0-noble AS build-image
+FROM --platform=linux/amd64 mcr.microsoft.com/playwright/python:v1.56.0-noble AS build-image
 ARG LAMBDA_TASK_ROOT
 RUN mkdir -p ${LAMBDA_TASK_ROOT}
 WORKDIR ${LAMBDA_TASK_ROOT}
@@ -23,7 +23,7 @@ RUN apt-get update \
 RUN pip install --target ${LAMBDA_TASK_ROOT} awslambdaric
 
 # Stage 2: Runtime — clean Microsoft base + copied artifacts
-FROM --platform=linux/arm64 mcr.microsoft.com/playwright/python:v1.56.0-noble
+FROM --platform=linux/amd64 mcr.microsoft.com/playwright/python:v1.56.0-noble
 ARG LAMBDA_TASK_ROOT
 WORKDIR ${LAMBDA_TASK_ROOT}
 
