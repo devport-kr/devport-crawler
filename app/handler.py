@@ -12,6 +12,7 @@ from app.jobs.port_sync import parse_project_ids, run_port_daily_sync
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    force=True,
 )
 logger = logging.getLogger(__name__)
 
