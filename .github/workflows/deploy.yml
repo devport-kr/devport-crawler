@@ -34,13 +34,25 @@ jobs:
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Build and push to ECR
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
-          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }} \
-                       -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY --all-tags
+          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:${{ github.sha }}"
+          LATEST_URI="$ECR_REGISTRY/$ECR_REPOSITORY:latest"
+
+          docker buildx build \
+            --platform linux/amd64 \
+            --provenance=false \
+            --tag "$IMAGE_URI" \
+            --tag "$LATEST_URI" \
+            --push \
+            .
+
+          docker buildx imagetools inspect "$IMAGE_URI"
 
       - name: Deploy to Lambda
         run: |
@@ -50,6 +62,7 @@ jobs:
             aws lambda update-function-code \
               --function-name "$fn" \
               --image-uri "$IMAGE_URI" \
+              --architectures x86_64 \
               > /dev/null
           done
           for fn in ${{ env.LAMBDA_FUNCTIONS }}; do

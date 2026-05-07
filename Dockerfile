@@ -8,9 +8,10 @@
 # Both stages use the SAME base image. awslambdaric must be installed via
 # pip --target so it lands in the function directory, not system site-packages.
 ARG LAMBDA_TASK_ROOT="/var/task"
+ARG LAMBDA_IMAGE_PLATFORM="linux/amd64"
 
 # Stage 1: Build — install awslambdaric (needs C++ toolchain)
-FROM --platform=linux/amd64 mcr.microsoft.com/playwright/python:v1.56.0-noble AS build-image
+FROM --platform=${LAMBDA_IMAGE_PLATFORM} mcr.microsoft.com/playwright/python:v1.56.0-noble AS build-image
 ARG LAMBDA_TASK_ROOT
 RUN mkdir -p ${LAMBDA_TASK_ROOT}
 WORKDIR ${LAMBDA_TASK_ROOT}
@@ -23,7 +24,7 @@ RUN apt-get update \
 RUN pip install --target ${LAMBDA_TASK_ROOT} awslambdaric
 
 # Stage 2: Runtime — clean Microsoft base + copied artifacts
-FROM --platform=linux/amd64 mcr.microsoft.com/playwright/python:v1.56.0-noble
+FROM --platform=${LAMBDA_IMAGE_PLATFORM} mcr.microsoft.com/playwright/python:v1.56.0-noble
 ARG LAMBDA_TASK_ROOT
 WORKDIR ${LAMBDA_TASK_ROOT}
 
