@@ -2,9 +2,9 @@
 
 from typing import List
 from datetime import datetime
-import asyncio
 import httpx
 from app.crawlers.base import BaseCrawler, RawArticle
+from app.crawlers.content import clean_hashnode_markdown
 from app.config.settings import settings
 
 
@@ -62,22 +62,30 @@ class HashnodeCrawler(BaseCrawler):
                 )
                 data = response.json()
 
-                edges = data.get("data", {}).get("feed", {}).get("edges", [])
+            edges = data.get("data", {}).get("feed", {}).get("edges", [])
 
-                for edge in edges:
-                    try:
-                        node = edge.get("node", {})
-                        article = self._parse_article(node)
-                        if not self.should_skip(article):
-                            articles.append(article)
-                    except Exception as e:
-                        self.logger.warning(f"Failed to parse article: {e}")
-                        continue
+            for edge in edges:
+                try:
+                    node = edge.get("node", {})
+                    article = self._parse_article(node)
+                    if not self.should_skip(article):
+                        articles.append(article)
+                except Exception as e:
+                    self.logger.warning(f"Failed to parse article: {e}")
+                    continue
 
-                await asyncio.sleep(self.delay)
-
-        except httpx.HTTPError as e:
-            self.log_error(e)
+        except httpx.HTTPStatusError as e:
+            location = e.response.headers.get("location", "")
+            if e.response.is_redirect and "announcements" in location:
+                # Since 2026-05-13 every GraphQL request needs a Hashnode Pro plan
+                # (https://hashnode.com/announcements/graphql-api); unauthenticated
+                # requests are redirected to that announcement.
+                self.logger.error(
+                    "Hashnode retired free GraphQL API access (2026-05-13); this source returns "
+                    "nothing until it gets a Pro-plan API token or is removed from the schedule"
+                )
+            else:
+                self.log_error(e)
         except Exception as e:
             self.log_error(e)
 
@@ -96,7 +104,7 @@ class HashnodeCrawler(BaseCrawler):
 
         # Prefer full markdown content, fall back to brief
         content_obj = node.get("content") or {}
-        content = content_obj.get("markdown") or node.get("brief", "")
+        content = clean_hashnode_markdown(content_obj.get("markdown") or "") or node.get("brief", "")
 
         return RawArticle(
             title_en=node["title"],

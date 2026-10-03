@@ -6,6 +6,7 @@ import asyncio
 import logging
 import httpx
 from app.crawlers.base import BaseCrawler, RawArticle
+from app.crawlers.content import clean_devto_markdown, html_fragment_to_markdown
 from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -37,14 +38,23 @@ class DevToCrawler(BaseCrawler):
                 )
                 data = response.json()
 
+                # Filter on listing metadata first so the per-article detail
+                # request is only made for articles we would actually keep.
+                candidates = []
                 for item in data:
                     try:
-                        article = await self._parse_article(client, item)
+                        article = self._parse_listing(item)
                         if not self.should_skip(article):
-                            articles.append(article)
+                            candidates.append(article)
                     except Exception as e:
                         self.logger.warning(f"Failed to parse article: {e}")
-                        continue
+
+                for article in self.drop_known(candidates):
+                    article_id = article.raw_data.get("id")
+                    body = await self._fetch_full_body(client, article_id) if article_id else ""
+                    # Fall back to the listing description if the detail fetch failed
+                    article.content = body or article.raw_data.get("description", "")
+                    articles.append(article)
 
                 await asyncio.sleep(self.delay)
 
@@ -57,7 +67,7 @@ class DevToCrawler(BaseCrawler):
         return articles
 
     async def _fetch_full_body(self, client: httpx.AsyncClient, article_id: int) -> str:
-        """Fetch full article body markdown from the Dev.to detail API."""
+        """Fetch full article body from the Dev.to detail API as clean markdown."""
         try:
             response = await self._retryable_http_request(
                 "GET",
@@ -68,26 +78,18 @@ class DevToCrawler(BaseCrawler):
                 max_retries=2,
             )
             detail = response.json()
-            return detail.get("body_markdown") or detail.get("body_html") or ""
+            if detail.get("body_markdown"):
+                return clean_devto_markdown(detail["body_markdown"])
+            return html_fragment_to_markdown(detail.get("body_html") or "")
         except Exception as e:
             logger.debug(f"Failed to fetch full body for Dev.to article {article_id}: {e}")
             return ""
 
-    async def _parse_article(self, client: httpx.AsyncClient, item: dict) -> RawArticle:
-        """Parse Dev.to API response into RawArticle, fetching full body"""
+    def _parse_listing(self, item: dict) -> RawArticle:
+        """Parse a Dev.to listing item into RawArticle (body is fetched separately)"""
         published_at = datetime.fromisoformat(
             item["published_at"].replace("Z", "+00:00")
         )
-
-        # Fetch full article body from detail endpoint
-        article_id = item.get("id")
-        content = ""
-        if article_id:
-            content = await self._fetch_full_body(client, article_id)
-
-        # Fall back to description if detail fetch failed
-        if not content:
-            content = item.get("description", "")
 
         return RawArticle(
             title_en=item["title"],
@@ -95,7 +97,7 @@ class DevToCrawler(BaseCrawler):
             source="devto",
             published_at=published_at,
             tags=item.get("tag_list", []),
-            content=content,
+            content="",
             upvotes=item.get("positive_reactions_count", 0),
             comments=item.get("comments_count", 0),
             read_time=f"{item.get('reading_time_minutes', 0)} min read",

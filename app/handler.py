@@ -8,6 +8,7 @@ from typing import Any, Dict
 
 from app.orchestrator import CrawlerOrchestrator
 from app.jobs.port_sync import parse_project_ids, run_port_daily_sync
+from app.utils import deadline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,6 +70,11 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         refresh_scores, port_sync
     """
     logger.info(f"Lambda invoked with event: {event}")
+
+    # Let long phases (Playwright renders, LLM translations) stop starting new
+    # work before Lambda kills the process; finished articles are already saved.
+    get_remaining_ms = getattr(context, "get_remaining_time_in_millis", None)
+    deadline.set_deadline(get_remaining_ms() / 1000 if callable(get_remaining_ms) else None)
 
     # Clean up Chromium leftovers from prior warm invocations before launching
     # a fresh browser. Cheap (Path.glob over /tmp) and only relevant for

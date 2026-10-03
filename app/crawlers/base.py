@@ -1,22 +1,45 @@
 """Base crawler class with common functionality"""
 
 from abc import ABC, abstractmethod
-from typing import List, Dict, Any, Optional
+from dataclasses import dataclass
+from typing import Callable, List, Dict, Any, Optional
 from datetime import datetime
 import asyncio
 import logging
-import re
 import httpx
-from bs4 import BeautifulSoup
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
 from app.config.settings import settings
+from app.crawlers.content import (
+    BROWSER_HEADERS,
+    GitHubRef,
+    assess_content,
+    extract_main_content,
+    normalize_markdown,
+    parse_github_url,
+    prose_chars,
+    unsupported_reason,
+)
+from app.utils import deadline
 
 logger = logging.getLogger(__name__)
 
-MIN_CONTENT_LENGTH = 6000
-
 # HTTP status codes that warrant a retry (transient server errors / rate limits)
 _RETRYABLE_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+# Parse at most this much HTML; a few pages are tens of MB of inline data.
+_MAX_HTML_CHARS = 3_000_000
+
+# Skip the Playwright fallback when the Lambda has less time than this left.
+_MIN_SECONDS_FOR_BROWSER = 180
+
+
+@dataclass(slots=True)
+class FetchedContent:
+    """Result of fetching one article URL."""
+
+    markdown: str
+    method: str  # github_api | httpx:<extractor> | playwright:<extractor> | skipped
+    issue: str = ""  # why the content is unusable; empty when it passed the quality gate
 
 
 class _HttpRetryableError(Exception):
@@ -70,12 +93,20 @@ class BaseCrawler(ABC):
     All source-specific crawlers inherit from this class
     """
 
-    def __init__(self):
+    def __init__(self, known_url_filter: Optional[Callable[[List[str]], set]] = None):
         self.logger = logging.getLogger(self.__class__.__name__)
         self.user_agent = settings.USER_AGENT
         self.delay = settings.CRAWL_DELAY_SECONDS
+        # Returns the subset of URLs already saved, so their (slow) content
+        # fetch can be skipped — dedup used to happen only after fetching.
+        self.known_url_filter = known_url_filter
         self._playwright_page = None
         self._playwright_page_lock = asyncio.Lock()
+        self._browser = None
+        self._pw = None
+        self._browser_attempted = False
+        self._browser_lock = asyncio.Lock()
+        self._http_sem = asyncio.Semaphore(settings.CONTENT_FETCH_CONCURRENCY)
 
     async def _diagnose_chromium_failure(self):
         """
@@ -237,6 +268,41 @@ class BaseCrawler(ABC):
             logger.warning(f"Playwright not available, falling back to httpx-only: {e}")
             return None, None
 
+    async def _get_browser(self):
+        """Launch Chromium on first use only — most pages never need it."""
+        async with self._browser_lock:
+            if not self._browser_attempted:
+                self._browser_attempted = True
+                self._browser, self._pw = await self._launch_browser()
+            return self._browser
+
+    async def close_browser(self) -> None:
+        browser, pw = self._browser, self._pw
+        self._browser = self._pw = self._playwright_page = None
+        if browser:
+            try:
+                await browser.close()
+            except Exception:
+                pass
+        if pw:
+            try:
+                await pw.stop()
+            except Exception:
+                pass
+
+    def drop_known(self, articles: List["RawArticle"]) -> List["RawArticle"]:
+        """Drop articles whose URL is already saved, before any content fetching."""
+        if not self.known_url_filter or not articles:
+            return articles
+        try:
+            known = self.known_url_filter([a.url for a in articles])
+        except Exception as e:
+            self.logger.warning(f"Known-URL lookup failed, fetching everything: {e}")
+            return articles
+        if known:
+            self.logger.info(f"Skipping {len(known)} already-saved URLs before content fetch")
+        return [a for a in articles if a.url not in known]
+
     @abstractmethod
     async def crawl(self) -> List[RawArticle]:
         """
@@ -329,94 +395,114 @@ class BaseCrawler(ABC):
         # Unreachable (tenacity reraises), but satisfies the type checker
         raise _HttpRetryableError(f"All retries exhausted for {url}")
 
-    @staticmethod
-    async def fetch_url_content(
-        client: httpx.AsyncClient,
-        url: str,
-        user_agent: str = None,
-        max_chars: int = 15000,
-    ) -> str:
+    async def fetch_article_content(self, client: httpx.AsyncClient, url: str) -> FetchedContent:
+        """Fetch an article body as clean markdown.
+
+        Order: skip URLs that never have an article body (video, social posts,
+        binaries) → GitHub API for repo/markdown links → plain HTTP + extraction
+        → Playwright render only when the static result fails the quality gate
+        (SPA shells, bot walls, near-empty extractions).
+
+        ``client`` must not carry source-specific auth headers: it talks to
+        arbitrary third-party sites.
         """
-        Fetch and extract readable text from an article URL.
+        reason = unsupported_reason(url)
+        if reason:
+            return FetchedContent("", "skipped", reason)
 
-        Uses BeautifulSoup to extract main content from HTML pages.
-        Returns empty string on any failure (non-blocking).
+        github = parse_github_url(url)
+        if github:
+            markdown = await self.fetch_github_markdown(client, github)
+            if markdown:
+                return FetchedContent(markdown, "github_api")
 
-        Args:
-            client: httpx async client to use
-            url: article URL to fetch
-            user_agent: User-Agent header value
-            max_chars: max characters to return (truncates beyond this)
+        min_chars = settings.MIN_ARTICLE_CONTENT_CHARS
+        markdown, method, status, content_type = await self._fetch_static_markdown(client, url)
+        check = assess_content(markdown, min_chars)
+        if check.ok:
+            return FetchedContent(markdown, method)
+        if status in (404, 410):
+            return FetchedContent(markdown, method, f"http_{status}")
+        if content_type and "html" not in content_type:
+            return FetchedContent("", method, f"not_html:{content_type.split(';')[0]}")
+        if deadline.remaining() < _MIN_SECONDS_FOR_BROWSER:
+            return FetchedContent(markdown, method, check.reason)
+
+        browser = await self._get_browser()
+        if browser is None:
+            return FetchedContent(markdown, method, check.reason)
+
+        html = await self.fetch_rendered_html(browser, url, timeout_ms=settings.PLAYWRIGHT_TIMEOUT_MS)
+        rendered, extractor = ("", "none")
+        if html:
+            rendered, extractor = await asyncio.to_thread(extract_main_content, html[:_MAX_HTML_CHARS], url)
+        rendered_check = assess_content(rendered, min_chars)
+        if rendered_check.ok or prose_chars(rendered) > prose_chars(markdown):
+            return FetchedContent(rendered, f"playwright:{extractor}", rendered_check.reason)
+        return FetchedContent(markdown, method, check.reason)
+
+    async def _fetch_static_markdown(
+        self, client: httpx.AsyncClient, url: str
+    ) -> tuple[str, str, Optional[int], str]:
+        """GET a page with browser-like headers and extract its main content.
+
+        Returns (markdown, method, http_status, content_type). Never raises.
         """
-        if not url:
-            return ""
-
+        headers = {**BROWSER_HEADERS, "User-Agent": settings.PLAYWRIGHT_USER_AGENT}
         try:
-            headers = {}
-            if user_agent:
-                headers["User-Agent"] = user_agent
+            async with self._http_sem:
+                response = await client.get(url, headers=headers, follow_redirects=True, timeout=15.0)
+        except Exception as e:
+            logger.debug(f"Static fetch failed for {url}: {e}")
+            return "", "httpx", None, ""
 
+        content_type = response.headers.get("content-type", "").lower()
+        if response.status_code >= 400 or "html" not in content_type:
+            return "", "httpx", response.status_code, content_type
+
+        markdown, extractor = await asyncio.to_thread(
+            extract_main_content, response.text[:_MAX_HTML_CHARS], str(response.url)
+        )
+        return markdown, f"httpx:{extractor}", response.status_code, content_type
+
+    @staticmethod
+    async def fetch_github_markdown(client: httpx.AsyncClient, ref: GitHubRef) -> str:
+        """Raw README (or linked markdown file) via the GitHub API — far cleaner than the HTML page."""
+        headers = {
+            "Accept": "application/vnd.github.raw+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": settings.USER_AGENT,
+        }
+        if settings.GITHUB_TOKEN:
+            headers["Authorization"] = f"Bearer {settings.GITHUB_TOKEN}"
+        base = f"https://api.github.com/repos/{ref.owner}/{ref.repo}"
+        endpoint = f"{base}/contents/{ref.path}" if ref.path else f"{base}/readme"
+        try:
             response = await client.get(
-                url,
-                follow_redirects=True,
+                endpoint,
                 headers=headers,
+                params={"ref": ref.ref} if ref.ref else None,
                 timeout=15.0,
             )
-            response.raise_for_status()
-
-            content_type = response.headers.get("content-type", "")
-            if "text/html" not in content_type:
-                return ""
-
-            soup = BeautifulSoup(response.text, "lxml")
-
-            # Remove non-content elements
-            for tag in soup(["script", "style", "nav", "header", "footer", "aside",
-                             "iframe", "noscript", "form", "button", "svg"]):
-                tag.decompose()
-
-            # Try <article> first, then <main>, then <body>
-            main = soup.find("article") or soup.find("main") or soup.find("body")
-            if not main:
-                return ""
-
-            text = main.get_text(separator="\n", strip=True)
-            # Collapse excessive blank lines
-            text = re.sub(r"\n{3,}", "\n\n", text)
-
-            if len(text) > max_chars:
-                text = text[:max_chars] + "\n\n[Content truncated]"
-
-            return text
-
         except Exception as e:
-            logger.debug(f"Failed to fetch content from {url}: {e}")
+            logger.debug(f"GitHub API fetch failed for {endpoint}: {e}")
             return ""
+        if response.status_code != 200:
+            logger.debug(f"GitHub API {response.status_code} for {endpoint}")
+            return ""
+        return normalize_markdown(response.text)
 
-    async def fetch_url_content_playwright(
-        self,
-        browser,
-        url: str,
-        timeout_ms: int = 30000,
-        max_chars: int = 15000,
-    ) -> str:
-        """
-        Fetch and extract readable text from a URL using Playwright (JS rendering).
+    async def fetch_rendered_html(self, browser, url: str, timeout_ms: int = 30000) -> str:
+        """Render a URL with Playwright (JS executed) and return the resulting HTML.
 
-        Reuses the single Playwright page created during browser smoke test,
-        navigates to the URL, then extracts text content via JS. Returns empty
-        string on any failure.
-
-        Args:
-            browser: Playwright Browser instance
-            url: article URL to fetch
-            timeout_ms: page load timeout in milliseconds
-            max_chars: max characters to return
+        Reuses the single page created during the browser smoke test (Lambda's
+        --single-process Chromium cannot reliably open a second page target).
+        Returns an empty string on any failure.
         """
         if not url:
             return ""
 
-        # Fail fast if Chromium has died — avoids 80 simultaneous page opens
+        # Fail fast if Chromium has died — avoids a queue of doomed navigations
         # all hitting "Target page, context or browser has been closed".
         if not browser.is_connected():
             return ""
@@ -446,35 +532,8 @@ class BaseCrawler(ABC):
                 except Exception:
                     pass
 
-                # Give client-rendered pages a small window to populate <main>.
-                await page.wait_for_timeout(750)
-
-                content = await page.evaluate("""() => {
-                const remove = 'script,style,nav,header,footer,aside,iframe,noscript,form,button,svg';
-                const nodes = [
-                    ...document.querySelectorAll('article'),
-                    ...document.querySelectorAll('main'),
-                    document.body,
-                ].filter(Boolean);
-
-                const texts = nodes.map((node) => {
-                    const clone = node.cloneNode(true);
-                    clone.querySelectorAll(remove).forEach(el => el.remove());
-                    return (clone.innerText || '').trim();
-                }).filter(Boolean);
-
-                const useful = texts.find(text => text.length >= 300);
-                if (useful) return useful;
-                return texts.sort((a, b) => b.length - a.length)[0] || '';
-            }""")
-
-                if not content:
-                    return ""
-
-                content = re.sub(r"\n{3,}", "\n\n", content)
-                if len(content) > max_chars:
-                    content = content[:max_chars] + "\n\n[Content truncated]"
-                return content
+                await self._wait_for_text_to_settle(page, settings.PLAYWRIGHT_SETTLE_MS)
+                return await page.content()
 
             except Exception as e:
                 logger.warning(f"Playwright failed for {url}: {e}")
@@ -482,6 +541,33 @@ class BaseCrawler(ABC):
             finally:
                 if page is not None and not page.is_closed():
                     await self._reset_playwright_page(page)
+
+    @staticmethod
+    async def _wait_for_text_to_settle(page, max_ms: int) -> None:
+        """Wait until client-side rendering stops adding text, up to ``max_ms``.
+
+        A fixed short sleep returned SPA shells ("Loading…") before the article
+        had rendered; a long fixed sleep wastes time on static pages.
+        """
+        previous, stable_polls, waited = -1, 0, 0
+        while waited < max_ms:
+            await page.wait_for_timeout(500)
+            waited += 500
+            try:
+                current = await page.evaluate(
+                    "() => document.body ? document.body.innerText.length : 0"
+                )
+            except Exception:
+                # Execution context replaced by a client-side redirect; keep waiting.
+                previous, stable_polls = -1, 0
+                continue
+            if current > 0 and current == previous:
+                stable_polls += 1
+                if stable_polls >= 2:
+                    return
+            else:
+                stable_polls = 0
+            previous = current
 
     @staticmethod
     async def _configure_playwright_page(page) -> None:

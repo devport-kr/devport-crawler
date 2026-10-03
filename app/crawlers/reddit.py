@@ -1,5 +1,6 @@
 """Reddit crawler using public JSON endpoints"""
 
+from collections import Counter
 from typing import List
 from datetime import datetime, timezone
 import asyncio
@@ -7,6 +8,7 @@ import httpx
 import re
 from urllib.parse import urlparse
 from app.crawlers.base import BaseCrawler, RawArticle
+from app.crawlers.content import canonicalize_url, normalize_markdown
 from app.config.settings import settings
 
 
@@ -39,6 +41,10 @@ class RedditCrawler(BaseCrawler):
     "opensource", "tech", "startup"
     ]
 
+    # Subreddits are fetched as multireddits (r/a+b+c) in groups of this size
+    SUBREDDITS_PER_REQUEST = 10
+    MAX_PAGES_PER_GROUP = 3
+
     BASE_URL = "https://www.reddit.com/r/{subreddit}/top.json"
     OAUTH_URL = "https://oauth.reddit.com/r/{subreddit}/top.json"
     TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
@@ -48,54 +54,89 @@ class RedditCrawler(BaseCrawler):
         Fetch top posts from selected subreddits.
 
         Performance strategy (mirrors HN crawler):
-        - Phase 1: Fetch all subreddit listings in parallel
-        - Phase 2: Parse metadata, filter, deduplicate (no content fetch yet)
-        - Phase 3: Fetch external link content in parallel via Playwright
+        - Phase 1: Fetch listings for groups of subreddits (r/a+b+c), a handful
+                   of requests instead of one per subreddit — Reddit throttles
+                   unauthenticated clients to ~10 requests/minute
+        - Phase 2: Parse metadata, filter, drop already-saved URLs (no content fetch yet)
+        - Phase 3: Fetch external link content in parallel: plain HTTP + extraction,
+                   Playwright only for pages that fail the quality gate
         """
         self.log_start()
 
-        browser = None
-        pw = None
         try:
-            browser, pw = await self._launch_browser()
-
             token = await self._get_access_token()
-            base_headers = {"User-Agent": self.user_agent}
+            base_headers = {"User-Agent": settings.REDDIT_USER_AGENT}
             if token:
                 base_headers["Authorization"] = f"bearer {token}"
+            else:
+                self.logger.warning(
+                    "REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET not set — using unauthenticated "
+                    "Reddit access, which Reddit blocks from most cloud IPs"
+                )
 
             base_url = self.OAUTH_URL if token else self.BASE_URL
-            sub_sem = asyncio.Semaphore(10)
 
-            async with httpx.AsyncClient(timeout=30.0, headers=base_headers) as client:
-                # Phase 1: Fetch all subreddit listings in parallel
-                async def fetch_subreddit(subreddit: str) -> List[dict]:
-                    async with sub_sem:
+            # The Reddit client carries the OAuth token; external article pages are
+            # fetched with a separate client so the token never leaves reddit.com.
+            async with httpx.AsyncClient(timeout=30.0, headers=base_headers) as client, \
+                    httpx.AsyncClient(timeout=20.0, follow_redirects=True) as content_client:
+                # Phase 1: Fetch listings per subreddit group, sequentially
+                failed_groups: List[str] = []  # HTTP status (or error) of groups that got nothing
+
+                async def fetch_group(subreddits: List[str]) -> List[dict]:
+                    posts: List[dict] = []
+                    after = None
+                    for page in range(self.MAX_PAGES_PER_GROUP):
+                        params = {"limit": 100, "t": "day", "raw_json": 1}
+                        if after:
+                            params["after"] = after
                         try:
                             response = await self._retryable_http_request(
                                 "GET",
-                                base_url.format(subreddit=subreddit),
+                                base_url.format(subreddit="+".join(subreddits)),
                                 client=client,
-                                params={"limit": 50, "t": "day", "raw_json": 1},
+                                params=params,
                             )
-                            data = response.json()
-                            children = data.get("data", {}).get("children", [])
-                            posts = []
-                            for child in children:
-                                post = child.get("data", {})
-                                if not post.get("stickied") and not post.get("over_18"):
-                                    post["__subreddit__"] = subreddit
-                                    posts.append(post)
-                            return posts
                         except Exception as e:
-                            self.logger.warning(f"Failed to fetch r/{subreddit}: {e}")
-                            return []
+                            status = e.response.status_code if isinstance(e, httpx.HTTPStatusError) else None
+                            if page == 0:
+                                failed_groups.append(str(status or type(e).__name__))
+                            self.logger.warning(f"Failed to fetch r/{'+'.join(subreddits)}: {e}")
+                            break
 
-                self.logger.info(f"Fetching listings from {len(self.SUBREDDITS)} subreddits...")
-                sub_results = await asyncio.gather(
-                    *[fetch_subreddit(s) for s in self.SUBREDDITS],
-                    return_exceptions=True,
+                        listing = response.json().get("data", {})
+                        children = listing.get("children", [])
+                        for child in children:
+                            post = child.get("data", {})
+                            if not post.get("stickied") and not post.get("over_18"):
+                                post["__subreddit__"] = post.get("subreddit") or subreddits[0]
+                                posts.append(post)
+
+                        # Results are sorted by score: stop once a page dips below the
+                        # upvote threshold (later pages can only be lower).
+                        after = listing.get("after")
+                        lowest = min((c.get("data", {}).get("score", 0) for c in children), default=0)
+                        if not after or lowest < settings.MIN_UPVOTES_REDDIT:
+                            break
+                    return posts
+
+                groups = [
+                    self.SUBREDDITS[i:i + self.SUBREDDITS_PER_REQUEST]
+                    for i in range(0, len(self.SUBREDDITS), self.SUBREDDITS_PER_REQUEST)
+                ]
+                self.logger.info(
+                    f"Fetching listings from {len(self.SUBREDDITS)} subreddits in {len(groups)} requests..."
                 )
+                sub_results = []
+                for group in groups:
+                    sub_results.append(await fetch_group(group))
+
+                if len(failed_groups) == len(groups):
+                    self.logger.error(
+                        f"Every Reddit listing request failed ({sorted(set(failed_groups))}). "
+                        "Reddit blocks unauthenticated API access from most cloud IPs — create a "
+                        "Reddit 'script' app and set REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET."
+                    )
 
                 # Phase 2: Parse metadata, filter, deduplicate (no content fetch)
                 seen_urls = set()
@@ -103,9 +144,6 @@ class RedditCrawler(BaseCrawler):
                 articles: List[RawArticle] = []
 
                 for result in sub_results:
-                    if isinstance(result, Exception):
-                        self.logger.warning(f"Subreddit fetch error: {result}")
-                        continue
                     for post in result:
                         try:
                             article = self._parse_post_metadata(post, post["__subreddit__"])
@@ -124,29 +162,20 @@ class RedditCrawler(BaseCrawler):
                         except Exception as e:
                             self.logger.warning(f"Failed to parse post: {e}")
 
+                articles = self.drop_known(articles)
+                articles_needing_content = self.drop_known(articles_needing_content)
                 self.logger.info(
                     f"After filtering: {len(articles)} with content, "
-                    f"{len(articles_needing_content)} need Playwright fetch"
+                    f"{len(articles_needing_content)} need external content fetch"
                 )
 
-                # Phase 3: Fetch external content in parallel — Playwright first, httpx fallback
-                pw_sem = asyncio.Semaphore(settings.PLAYWRIGHT_CONCURRENCY)
-                http_sem = asyncio.Semaphore(settings.CONTENT_FETCH_CONCURRENCY)
-
+                # Phase 3: Fetch external content in parallel
                 async def fetch_content(article: RawArticle) -> RawArticle:
-                    content = ""
-                    if browser is not None:
-                        async with pw_sem:
-                            content = await self.fetch_url_content_playwright(
-                                browser, article.url,
-                                timeout_ms=settings.PLAYWRIGHT_TIMEOUT_MS,
-                            )
-                    if not content:
-                        async with http_sem:
-                            content = await self.fetch_url_content(
-                                client, article.url, self.user_agent,
-                            )
+                    fetched = await self.fetch_article_content(content_client, article.url)
+                    content = fetched.markdown
                     article.content = content
+                    article.raw_data["content_method"] = fetched.method
+                    article.raw_data["content_issue"] = fetched.issue
                     # Update read time now that we have content
                     words = len(content.split()) if content else 0
                     if words:
@@ -164,20 +193,17 @@ class RedditCrawler(BaseCrawler):
                     elif isinstance(result, Exception):
                         self.logger.warning(f"Content fetch error: {result}")
 
+                fetched = [a for a in articles if "content_method" in a.raw_data]
+                self.logger.info(
+                    f"External content: methods={dict(Counter(a.raw_data['content_method'] for a in fetched))} "
+                    f"issues={dict(Counter(a.raw_data['content_issue'] for a in fetched if a.raw_data['content_issue']))}"
+                )
+
         except Exception as e:
             self.log_error(e)
             articles = []
         finally:
-            if browser:
-                try:
-                    await browser.close()
-                except Exception:
-                    pass
-            if pw:
-                try:
-                    await pw.stop()
-                except Exception:
-                    pass
+            await self.close_browser()
 
         self.log_end(len(articles))
         return articles
@@ -187,11 +213,12 @@ class RedditCrawler(BaseCrawler):
         created_ts = post.get("created_utc")
         published_at = datetime.fromtimestamp(created_ts, tz=timezone.utc) if created_ts else datetime.utcnow()
 
-        content = post.get("selftext") or ""
+        content = normalize_markdown(post.get("selftext") or "")
 
         url = post.get("url_overridden_by_dest") or post.get("url")
         if not url:
             url = f"https://www.reddit.com{post.get('permalink', '')}"
+        url = canonicalize_url(url)
 
         domain = self._extract_domain(url)
         is_self = post.get("is_self")
@@ -236,7 +263,7 @@ class RedditCrawler(BaseCrawler):
         url = article.url.lower()
         has_text = bool(article.content and article.content.strip())
 
-        image_ext = re.search(r"\\.(png|jpe?g|gif|webp)$", url)
+        image_ext = re.search(r"\.(png|jpe?g|gif|webp)$", url)
         is_image_host = any(host in url for host in ["i.redd.it", "i.imgur.com"])
 
         if not has_text and (post_hint in {"image", "rich:video", "hosted:video"} or is_gallery or image_ext or is_image_host):
@@ -272,7 +299,7 @@ class RedditCrawler(BaseCrawler):
         try:
             auth = (client_id, client_secret)
             data = {"grant_type": "client_credentials"}
-            headers = {"User-Agent": self.user_agent}
+            headers = {"User-Agent": settings.REDDIT_USER_AGENT}
 
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(self.TOKEN_URL, data=data, auth=auth, headers=headers)
