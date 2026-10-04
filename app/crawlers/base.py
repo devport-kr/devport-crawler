@@ -592,7 +592,7 @@ class BaseCrawler(ABC):
         Send failed article info to Discord webhook.
 
         Args:
-            source_name: crawler name (e.g. "HackerNews", "Reddit")
+            source_name: crawler name (e.g. "HackerNews", "Devto")
             failed_articles: list of dicts with keys: title, url, discussion_url, upvotes, comments
         """
         webhook_url = settings.DISCORD_WEBHOOK_URL

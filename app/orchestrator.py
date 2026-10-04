@@ -9,9 +9,7 @@ import uuid
 from sqlalchemy.orm import Session
 
 from app.crawlers.devto import DevToCrawler
-from app.crawlers.hashnode import HashnodeCrawler
 # from app.crawlers.medium import MediumCrawler  # Disabled: ~70% of articles are RSS excerpts, not full content
-from app.crawlers.reddit import RedditCrawler
 from app.crawlers.hackernews import HackerNewsCrawler
 from app.crawlers.github import GitHubCrawler
 from app.crawlers.llm_rankings import LLMRankingsCrawler
@@ -60,9 +58,7 @@ class CrawlerOrchestrator:
 
         sources = [
             ("devto", DevToCrawler(known_url_filter=self._known_article_urls)),
-            ("hashnode", HashnodeCrawler()),
             # ("medium", MediumCrawler()),  # Disabled: ~70% of articles are RSS excerpts, not full content
-            ("reddit", RedditCrawler(known_url_filter=self._known_article_urls)),
             ("hackernews", HackerNewsCrawler(known_url_filter=self._known_article_urls))
         ]
 
@@ -311,41 +307,6 @@ class CrawlerOrchestrator:
 
         return stats
 
-    async def run_hashnode_crawler(self) -> Dict[str, Any]:
-        """
-        Run Hashnode crawler
-
-        Returns:
-            Dictionary with crawling statistics
-        """
-        logger.info("Starting Hashnode crawler...")
-
-        stats = {
-            "started_at": datetime.utcnow().isoformat(),
-            "source": "hashnode",
-            "crawled": 0,
-            "saved": 0,
-            "success": False
-        }
-
-        try:
-            crawler = HashnodeCrawler()
-            articles = await crawler.crawl()
-            saved = await self._process_and_save_articles(articles)
-
-            stats["crawled"] = len(articles)
-            stats["saved"] = saved
-            stats["success"] = True
-
-        except Exception as e:
-            logger.error(f"Error crawling Hashnode: {e}", exc_info=True)
-            stats["error"] = str(e)
-
-        stats["completed_at"] = datetime.utcnow().isoformat()
-        logger.info(f"Hashnode crawler completed. Saved: {stats['saved']}")
-
-        return stats
-
     # async def run_medium_crawler(self) -> Dict[str, Any]:
     #     """
     #     Run Medium crawler
@@ -378,41 +339,6 @@ class CrawlerOrchestrator:
     #     logger.info(f"Medium crawler completed. Saved: {stats['saved']}")
     #
     #     return stats
-
-    async def run_reddit_crawler(self) -> Dict[str, Any]:
-        """
-        Run Reddit crawler
-
-        Returns:
-            Dictionary with crawling statistics
-        """
-        logger.info("Starting Reddit crawler...")
-
-        stats = {
-            "started_at": datetime.utcnow().isoformat(),
-            "source": "reddit",
-            "crawled": 0,
-            "saved": 0,
-            "success": False
-        }
-
-        try:
-            crawler = RedditCrawler(known_url_filter=self._known_article_urls)
-            articles = await crawler.crawl()
-            saved = await self._process_and_save_articles(articles)
-
-            stats["crawled"] = len(articles)
-            stats["saved"] = saved
-            stats["success"] = True
-
-        except Exception as e:
-            logger.error(f"Error crawling Reddit: {e}", exc_info=True)
-            stats["error"] = str(e)
-
-        stats["completed_at"] = datetime.utcnow().isoformat()
-        logger.info(f"Reddit crawler completed. Saved: {stats['saved']}")
-
-        return stats
 
     async def run_hackernews_crawler(self) -> Dict[str, Any]:
         """
@@ -528,7 +454,7 @@ class CrawlerOrchestrator:
         """Insert one article and its tags in its own transaction."""
         if article.source == "github":
             item_type = ItemType.REPO
-        elif article.source == "reddit" or article.raw_data.get("hn_id"):
+        elif article.raw_data.get("hn_id"):
             item_type = ItemType.DISCUSSION
         else:
             item_type = ItemType.BLOG
@@ -589,9 +515,6 @@ class CrawlerOrchestrator:
             if raw.get("hn_id"):
                 source_name = "HackerNews"
                 discussion_url = raw.get("hn_discussion_url")
-            elif raw.get("permalink"):
-                source_name = "Reddit"
-                discussion_url = f"https://www.reddit.com{raw['permalink']}"
             else:
                 source_name = article.source.capitalize()
                 discussion_url = None

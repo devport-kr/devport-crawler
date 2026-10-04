@@ -17,7 +17,7 @@ devport.kr 크롤링 서비스
 🚧 **테스트 진행 중**
 
 - ✅ Dev.to 크롤러 - 테스트 완료
-- 🚧 Hashnode, Medium, GitHub 크롤러 - 테스트 대기 중
+- 🚧 Medium, GitHub 크롤러 - 테스트 대기 중
 
 ## 주요 기능
 
@@ -25,11 +25,9 @@ devport.kr 크롤링 서비스
 
 1. **개발 블로그**
    - Dev.to 인기 게시글 (최근 7일, 반응 4개 이상) — 전체 본문 fetch
-   - Hashnode 추천 아티클 — 전체 마크다운 본문 fetch
    - Medium 프로그래밍 태그 — RSS 콘텐츠
 
 2. **개발자 커뮤니티**
-   - Reddit 개발 서브레딧 (링크 게시물 본문 fetch)
    - Hacker News 인기 스토리 (원문 기사 본문 fetch)
 
 3. **GitHub**
@@ -76,7 +74,6 @@ curl -X POST http://localhost:8000/api/crawl/devto
 ## API 엔드포인트
 
 - `POST /api/crawl/devto` - Dev.to 크롤링
-- `POST /api/crawl/hashnode` - Hashnode 크롤링
 - `POST /api/crawl/medium` - Medium 크롤링
 - `POST /api/crawl/github` - GitHub 크롤링
 - `GET /api/health` - 헬스 체크
@@ -90,8 +87,6 @@ OPENAI_API_KEY=your-api-key
 LLM_MODEL=gpt-6-luna            # 번역 품질을 더 높이려면 gpt-6.1-sol
 LLM_TRIAGE_MODEL=gpt-6-luna
 GITHUB_TOKEN=your-github-token  # README 수집 (API 한도 60 → 5000 req/h)
-REDDIT_CLIENT_ID=...            # Reddit은 비인증 접근을 차단하므로 사실상 필수
-REDDIT_CLIENT_SECRET=...
 MIN_REACTIONS_DEVTO=4
 ```
 

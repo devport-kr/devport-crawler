@@ -160,7 +160,6 @@ def normalize_markdown(md: str) -> str:
 _FRONT_MATTER_RE = re.compile(r"\A---\s*\n.*?\n---\s*\n", re.S)
 _LIQUID_PAIRED_RE = re.compile(r"{%-?\s*(?:end\w+|raw|katex|details\b[^%]*|spoiler\b[^%]*|collapsible\b[^%]*)\s*-?%}")
 _LIQUID_EMBED_RE = re.compile(r"{%-?\s*\w+[^%]*-?%}")
-_HASHNODE_EMBED_RE = re.compile(r"^%\[[^\]]*\]\s*$", re.M)
 
 
 def clean_devto_markdown(md: str) -> str:
@@ -172,11 +171,6 @@ def clean_devto_markdown(md: str) -> str:
         return _LIQUID_EMBED_RE.sub("", text)
 
     return normalize_markdown(_map_prose(md, _liquid))
-
-
-def clean_hashnode_markdown(md: str) -> str:
-    """Hashnode markdown: drop %[url] embed lines and image alignment syntax."""
-    return normalize_markdown(_map_prose(md or "", lambda t: _HASHNODE_EMBED_RE.sub("", t)))
 
 
 # --------------------------------------------------------------------------- #

@@ -95,8 +95,6 @@ class Settings(BaseSettings):
 
     # Filtering
     MIN_REACTIONS_DEVTO: int = 10
-    MIN_REACTIONS_HASHNODE: int = 5
-    MIN_UPVOTES_REDDIT: int = 100
     MIN_SCORE_HACKERNEWS: int = 50
     MIN_STARS_GITHUB: int = 50
 
@@ -113,7 +111,7 @@ class Settings(BaseSettings):
     MAX_ARTICLE_CONTENT_CHARS: int = 50000  # Longer bodies are cut at a paragraph boundary
     MAX_README_CHARS: int = 20000
 
-    # Playwright (JS-rendered content fetching for HN & Reddit)
+    # Playwright (JS-rendered fallback when fetching Hacker News links)
     PLAYWRIGHT_HEADLESS: bool = True
     PLAYWRIGHT_TIMEOUT_MS: int = 15000  # Page load timeout
     PLAYWRIGHT_SETTLE_MS: int = 6000  # Max wait for client-rendered text to stop growing
@@ -125,13 +123,6 @@ class Settings(BaseSettings):
     # Sequential page opens — required when using --single-process Chromium.
     # Multi-target CDP requests under single-process race and fail.
     PLAYWRIGHT_CONCURRENCY: int = 1
-
-    # Reddit API. Without OAuth credentials Reddit answers 403/429 to most
-    # cloud IPs, so the Reddit source effectively needs a (free) "script" app.
-    REDDIT_CLIENT_ID: Optional[str] = None
-    REDDIT_CLIENT_SECRET: Optional[str] = None
-    # Reddit requires a descriptive "<platform>:<app id>:<version> (by /u/<user>)" UA
-    REDDIT_USER_AGENT: str = "python:kr.devport.crawler:1.1 (+https://devport.kr)"
 
     # Crawler HTTP retry policy
     CRAWLER_HTTP_MAX_RETRIES: int = 3

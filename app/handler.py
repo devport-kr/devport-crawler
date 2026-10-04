@@ -65,7 +65,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         {"source": "port_sync", "stages": "events,metrics", "project_ids": "1,2"}
 
     Supported sources:
-        github, devto, hashnode, reddit, hackernews,
+        github, devto, hackernews,
         all_blogs, llm_rankings, llm_media_rankings,
         refresh_scores, port_sync
     """
@@ -89,12 +89,6 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         elif source == "devto":
             result = asyncio.run(_get_orchestrator().run_devto_crawler())
-
-        elif source == "hashnode":
-            result = asyncio.run(_get_orchestrator().run_hashnode_crawler())
-
-        elif source == "reddit":
-            result = asyncio.run(_get_orchestrator().run_reddit_crawler())
 
         elif source == "hackernews":
             result = asyncio.run(_get_orchestrator().run_hackernews_crawler())
