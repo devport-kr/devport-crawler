@@ -8,6 +8,7 @@ from typing import Any, Dict
 
 from app.orchestrator import CrawlerOrchestrator
 from app.jobs.port_sync import parse_project_ids, run_port_daily_sync
+from app.utils import deadline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -64,11 +65,16 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         {"source": "port_sync", "stages": "events,metrics", "project_ids": "1,2"}
 
     Supported sources:
-        github, devto, hashnode, reddit, hackernews,
+        github, devto, hackernews,
         all_blogs, llm_rankings, llm_media_rankings,
         refresh_scores, port_sync
     """
     logger.info(f"Lambda invoked with event: {event}")
+
+    # Let long phases (Playwright renders, LLM translations) stop starting new
+    # work before Lambda kills the process; finished articles are already saved.
+    get_remaining_ms = getattr(context, "get_remaining_time_in_millis", None)
+    deadline.set_deadline(get_remaining_ms() / 1000 if callable(get_remaining_ms) else None)
 
     # Clean up Chromium leftovers from prior warm invocations before launching
     # a fresh browser. Cheap (Path.glob over /tmp) and only relevant for
@@ -83,12 +89,6 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         elif source == "devto":
             result = asyncio.run(_get_orchestrator().run_devto_crawler())
-
-        elif source == "hashnode":
-            result = asyncio.run(_get_orchestrator().run_hashnode_crawler())
-
-        elif source == "reddit":
-            result = asyncio.run(_get_orchestrator().run_reddit_crawler())
 
         elif source == "hackernews":
             result = asyncio.run(_get_orchestrator().run_hackernews_crawler())

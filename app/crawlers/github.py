@@ -6,6 +6,7 @@ import asyncio
 import httpx
 from bs4 import BeautifulSoup
 from app.crawlers.base import BaseCrawler, RawArticle
+from app.crawlers.content import GitHubRef
 from app.config.settings import settings
 
 
@@ -103,6 +104,29 @@ class GitHubCrawler(BaseCrawler):
 
         self.log_end(len(articles))
         return articles
+
+    async def attach_readmes(self, repos: List[RawArticle]) -> None:
+        """Fetch each repo's README (GitHub API) into raw_data["readme"].
+
+        The trending page only has a one-line description; summarizing from
+        that alone made the LLM invent the rest of the write-up.
+        """
+        sem = asyncio.Semaphore(5)
+
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            async def fetch(repo: RawArticle) -> None:
+                owner, _, name = repo.title_en.partition("/")
+                if not owner or not name:
+                    return
+                async with sem:
+                    repo.raw_data["readme"] = await self.fetch_github_markdown(
+                        client, GitHubRef(owner, name)
+                    )
+
+            await asyncio.gather(*(fetch(r) for r in repos), return_exceptions=True)
+
+        found = sum(1 for r in repos if r.raw_data.get("readme"))
+        self.logger.info(f"Fetched READMEs for {found}/{len(repos)} repositories")
 
     def _parse_star_count(self, text: str) -> int:
         """Parse star count from text like '1,234' or '1.2k' to integer"""

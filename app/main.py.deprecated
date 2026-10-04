@@ -61,9 +61,7 @@ async def root():
             "health": "/api/health",
             "stats": "/api/stats",
             "crawl_devto": "POST /api/crawl/devto",
-            "crawl_hashnode": "POST /api/crawl/hashnode",
             "crawl_medium": "POST /api/crawl/medium",
-            "crawl_reddit": "POST /api/crawl/reddit",
             "crawl_hackernews": "POST /api/crawl/hackernews",
             "crawl_github": "POST /api/crawl/github",
             "crawl_llm": "POST /api/crawl/llm-rankings",
@@ -119,27 +117,6 @@ async def crawl_devto(background_tasks: BackgroundTasks):
     }
 
 
-@app.post("/api/crawl/hashnode")
-async def crawl_hashnode(background_tasks: BackgroundTasks):
-    """Trigger Hashnode crawling"""
-    logger.info("Hashnode crawl triggered")
-
-    async def run_crawler():
-        try:
-            stats = await orchestrator.run_hashnode_crawler()
-            last_stats["hashnode"] = stats
-            logger.info(f"Hashnode crawler completed: {stats.get('saved', 0)} articles saved")
-        except Exception as e:
-            logger.error(f"Hashnode crawler failed: {e}", exc_info=True)
-
-    background_tasks.add_task(run_crawler)
-    return {
-        "status": "started",
-        "source": "hashnode",
-        "message": "Hashnode crawler started in background"
-    }
-
-
 @app.post("/api/crawl/medium")
 async def crawl_medium(background_tasks: BackgroundTasks):
     """Trigger Medium crawling"""
@@ -158,27 +135,6 @@ async def crawl_medium(background_tasks: BackgroundTasks):
         "status": "started",
         "source": "medium",
         "message": "Medium crawler started in background"
-    }
-
-
-@app.post("/api/crawl/reddit")
-async def crawl_reddit(background_tasks: BackgroundTasks):
-    """Trigger Reddit crawling"""
-    logger.info("Reddit crawl triggered")
-
-    async def run_crawler():
-        try:
-            stats = await orchestrator.run_reddit_crawler()
-            last_stats["reddit"] = stats
-            logger.info(f"Reddit crawler completed: {stats.get('saved', 0)} articles saved")
-        except Exception as e:
-            logger.error(f"Reddit crawler failed: {e}", exc_info=True)
-
-    background_tasks.add_task(run_crawler)
-    return {
-        "status": "started",
-        "source": "reddit",
-        "message": "Reddit crawler started in background"
     }
 
 
@@ -307,7 +263,7 @@ async def crawl_all(background_tasks: BackgroundTasks):
     background_tasks.add_task(run_all)
     return {
         "status": "started",
-        "sources": ["devto", "hashnode", "medium", "reddit"],
+        "sources": ["devto", "hackernews"],
         "message": "All blog crawlers started in background"
     }
 

@@ -19,10 +19,8 @@ class Source(str, enum.Enum):
     """Article source"""
     GITHUB = "github"
     DEVTO = "devto"
-    HASHNODE = "hashnode"
     MEDIUM = "medium"
     HACKERNEWS = "hackernews"
-    REDDIT = "reddit"
 
 
 class Category(str, enum.Enum):

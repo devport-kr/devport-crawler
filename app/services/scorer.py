@@ -64,7 +64,7 @@ class ScorerService:
             # For GitHub, stars are the primary metric
             return article.stars or 0
 
-        elif article.source in ["devto", "hashnode", "medium"]:
+        elif article.source in ["devto", "medium"]:
             # For blogs, use upvotes/reactions
             return article.upvotes or 0
 

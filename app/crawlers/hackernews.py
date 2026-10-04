@@ -2,13 +2,14 @@
 
 import asyncio
 import logging
+from collections import Counter
 from typing import List, Optional
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 import httpx
-from bs4 import BeautifulSoup
 
 from app.crawlers.base import BaseCrawler, RawArticle
+from app.crawlers.content import canonicalize_url, html_fragment_to_markdown
 from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
@@ -26,16 +27,17 @@ class HackerNewsCrawler(BaseCrawler):
 
     Performance strategy:
     - Phase 1: Fetch all story metadata in parallel (lightweight API calls)
-    - Phase 2: Apply should_skip() filter to drop low-engagement/old stories
-    - Phase 3: Fetch content for remaining stories in parallel,
-               using httpx first with Playwright JS-rendering fallback
+    - Phase 2: Drop low-engagement/old stories and URLs that are already saved
+    - Phase 3: Fetch content for remaining stories in parallel: plain HTTP +
+               main-content extraction, Playwright only for pages that fail
+               the quality gate (SPAs, bot walls)
     """
 
     BASE_URL = "https://hacker-news.firebaseio.com/v0"
     HN_ITEM_URL = "https://news.ycombinator.com/item?id={}"
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, known_url_filter=None):
+        super().__init__(known_url_filter=known_url_filter)
         self.min_score = getattr(settings, 'MIN_SCORE_HACKERNEWS', 50)
         self.max_age_days = getattr(settings, 'MAX_AGE_DAYS_HACKERNEWS', 7)
         self.max_stories = getattr(settings, 'MAX_STORIES_HACKERNEWS', 100)
@@ -44,17 +46,11 @@ class HackerNewsCrawler(BaseCrawler):
         """Fetch top stories from HN with parallel content fetching and Playwright fallback."""
         logger.info(f"Starting HN crawl (min_score={self.min_score}, max_age={self.max_age_days}d)")
 
-        browser = None
-        pw = None
         try:
-            # Launch Playwright browser (shared across all content fetches)
-            browser, pw = await self._launch_browser()
-
-            http_sem = asyncio.Semaphore(settings.CONTENT_FETCH_CONCURRENCY)
-            pw_sem = asyncio.Semaphore(settings.PLAYWRIGHT_CONCURRENCY)
             meta_sem = asyncio.Semaphore(20)
 
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=30.0) as client, \
+                    httpx.AsyncClient(timeout=20.0, follow_redirects=True) as content_client:
                 # Phase 1: Get top story IDs
                 response = await self._retryable_http_request(
                     "GET", f"{self.BASE_URL}/topstories.json", client=client,
@@ -72,7 +68,7 @@ class HackerNewsCrawler(BaseCrawler):
                     return_exceptions=True,
                 )
 
-                # Phase 3: Apply should_skip filter BEFORE expensive content fetching
+                # Phase 3: Filter BEFORE expensive content fetching
                 stories_to_fetch = []
                 for result in meta_results:
                     if isinstance(result, Exception):
@@ -81,12 +77,13 @@ class HackerNewsCrawler(BaseCrawler):
                     if result is not None and not self.should_skip(result):
                         stories_to_fetch.append(result)
 
+                stories_to_fetch = self.drop_known(stories_to_fetch)
                 logger.info(
                     f"After filtering: {len(stories_to_fetch)}/{len(story_ids)} stories "
                     f"to fetch content for"
                 )
 
-                # Phase 4: Fetch content — Playwright first, httpx fallback
+                # Phase 4: Fetch content — HTTP + extraction, Playwright fallback
                 async def fetch_content(article: RawArticle) -> RawArticle:
                     original_url = article.raw_data.get("original_url", "")
 
@@ -94,31 +91,10 @@ class HackerNewsCrawler(BaseCrawler):
                     if not original_url or "news.ycombinator.com" in original_url:
                         return article
 
-                    content = ""
-
-                    # Primary: Playwright with JS rendering
-                    if browser is not None:
-                        async with pw_sem:
-                            content = await self.fetch_url_content_playwright(
-                                browser,
-                                original_url,
-                                timeout_ms=settings.PLAYWRIGHT_TIMEOUT_MS,
-                            )
-                        if content:
-                            logger.info(f"Playwright got {len(content)} chars from {original_url}")
-                            article.raw_data["used_playwright"] = True
-
-                    # Fallback: httpx + BeautifulSoup
-                    if not content:
-                        async with http_sem:
-                            content = await self.fetch_url_content(
-                                client, original_url, self.user_agent
-                            )
-                        if content:
-                            logger.info(f"httpx fallback got {len(content)} chars from {original_url}")
-                        article.raw_data["used_playwright"] = False
-
-                    article.content = content
+                    fetched = await self.fetch_article_content(content_client, original_url)
+                    article.content = fetched.markdown
+                    article.raw_data["content_method"] = fetched.method
+                    article.raw_data["content_issue"] = fetched.issue
                     return article
 
                 content_results = await asyncio.gather(
@@ -133,23 +109,19 @@ class HackerNewsCrawler(BaseCrawler):
                     elif isinstance(result, Exception):
                         logger.warning(f"Error fetching content: {result}")
 
-                logger.info(f"Successfully crawled {len(articles)} HN stories")
+                methods = Counter(a.raw_data.get("content_method", "hn_text") for a in articles)
+                issues = Counter(a.raw_data.get("content_issue") for a in articles if a.raw_data.get("content_issue"))
+                logger.info(
+                    f"Successfully crawled {len(articles)} HN stories; "
+                    f"content methods={dict(methods)} issues={dict(issues)}"
+                )
                 return articles
 
         except Exception as e:
             logger.error(f"Error crawling Hacker News: {e}", exc_info=True)
             return []
         finally:
-            if browser:
-                try:
-                    await browser.close()
-                except Exception:
-                    pass
-            if pw:
-                try:
-                    await pw.stop()
-                except Exception:
-                    pass
+            await self.close_browser()
 
     async def _fetch_story_metadata(
         self, client: httpx.AsyncClient, story_id: int
@@ -166,14 +138,13 @@ class HackerNewsCrawler(BaseCrawler):
         if not story:
             return None
 
-        original_url = story.get("url", "")
+        original_url = canonicalize_url(story.get("url", ""))
         discussion_url = self.HN_ITEM_URL.format(story_id)
 
-        # For Ask HN / Show HN, use the HN post text as initial content
+        # For Ask HN / Show HN, use the HN post text (HTML) as initial content
         content = ""
         if not original_url and story.get("text"):
-            soup = BeautifulSoup(story["text"], "lxml")
-            content = soup.get_text(separator="\n", strip=True)
+            content = html_fragment_to_markdown(story["text"])
 
         # Extract domain from original URL as source, fallback to "hackernews"
         source = "hackernews"

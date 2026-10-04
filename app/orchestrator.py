@@ -1,5 +1,6 @@
 """Orchestrator to coordinate crawler execution and data processing"""
 
+from collections import Counter
 from typing import List, Dict, Any
 from datetime import datetime
 import asyncio
@@ -8,15 +9,14 @@ import uuid
 from sqlalchemy.orm import Session
 
 from app.crawlers.devto import DevToCrawler
-from app.crawlers.hashnode import HashnodeCrawler
 # from app.crawlers.medium import MediumCrawler  # Disabled: ~70% of articles are RSS excerpts, not full content
-from app.crawlers.reddit import RedditCrawler
 from app.crawlers.hackernews import HackerNewsCrawler
 from app.crawlers.github import GitHubCrawler
 from app.crawlers.llm_rankings import LLMRankingsCrawler
 from app.crawlers.llm_media_rankings import LLMMediaRankingsCrawler
-from app.crawlers.base import BaseCrawler, RawArticle, MIN_CONTENT_LENGTH
-from app.services.summarizer import SummarizerService
+from app.crawlers.base import BaseCrawler, RawArticle
+from app.crawlers.content import assess_content
+from app.services.summarizer import SummarizerService, SummaryResult
 from app.services.scorer import ScorerService
 from app.services.deduplicator import DeduplicatorService
 from app.services.webhook_dispatcher import dispatch_completion_webhook
@@ -24,6 +24,7 @@ from app.models.article import Article, ItemType, Category
 from app.models.article_tag import ArticleTag
 from app.models.git_repo import GitRepo
 from app.config.database import SessionLocal
+from app.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -56,11 +57,9 @@ class CrawlerOrchestrator:
         }
 
         sources = [
-            ("devto", DevToCrawler()),
-            ("hashnode", HashnodeCrawler()),
+            ("devto", DevToCrawler(known_url_filter=self._known_article_urls)),
             # ("medium", MediumCrawler()),  # Disabled: ~70% of articles are RSS excerpts, not full content
-            ("reddit", RedditCrawler()),
-            ("hackernews", HackerNewsCrawler())
+            ("hackernews", HackerNewsCrawler(known_url_filter=self._known_article_urls))
         ]
 
         async def run_source(source_name: str, crawler) -> tuple:
@@ -291,7 +290,7 @@ class CrawlerOrchestrator:
         }
 
         try:
-            crawler = DevToCrawler()
+            crawler = DevToCrawler(known_url_filter=self._known_article_urls)
             articles = await crawler.crawl()
             saved = await self._process_and_save_articles(articles)
 
@@ -305,41 +304,6 @@ class CrawlerOrchestrator:
 
         stats["completed_at"] = datetime.utcnow().isoformat()
         logger.info(f"Dev.to crawler completed. Saved: {stats['saved']}")
-
-        return stats
-
-    async def run_hashnode_crawler(self) -> Dict[str, Any]:
-        """
-        Run Hashnode crawler
-
-        Returns:
-            Dictionary with crawling statistics
-        """
-        logger.info("Starting Hashnode crawler...")
-
-        stats = {
-            "started_at": datetime.utcnow().isoformat(),
-            "source": "hashnode",
-            "crawled": 0,
-            "saved": 0,
-            "success": False
-        }
-
-        try:
-            crawler = HashnodeCrawler()
-            articles = await crawler.crawl()
-            saved = await self._process_and_save_articles(articles)
-
-            stats["crawled"] = len(articles)
-            stats["saved"] = saved
-            stats["success"] = True
-
-        except Exception as e:
-            logger.error(f"Error crawling Hashnode: {e}", exc_info=True)
-            stats["error"] = str(e)
-
-        stats["completed_at"] = datetime.utcnow().isoformat()
-        logger.info(f"Hashnode crawler completed. Saved: {stats['saved']}")
 
         return stats
 
@@ -376,41 +340,6 @@ class CrawlerOrchestrator:
     #
     #     return stats
 
-    async def run_reddit_crawler(self) -> Dict[str, Any]:
-        """
-        Run Reddit crawler
-
-        Returns:
-            Dictionary with crawling statistics
-        """
-        logger.info("Starting Reddit crawler...")
-
-        stats = {
-            "started_at": datetime.utcnow().isoformat(),
-            "source": "reddit",
-            "crawled": 0,
-            "saved": 0,
-            "success": False
-        }
-
-        try:
-            crawler = RedditCrawler()
-            articles = await crawler.crawl()
-            saved = await self._process_and_save_articles(articles)
-
-            stats["crawled"] = len(articles)
-            stats["saved"] = saved
-            stats["success"] = True
-
-        except Exception as e:
-            logger.error(f"Error crawling Reddit: {e}", exc_info=True)
-            stats["error"] = str(e)
-
-        stats["completed_at"] = datetime.utcnow().isoformat()
-        logger.info(f"Reddit crawler completed. Saved: {stats['saved']}")
-
-        return stats
-
     async def run_hackernews_crawler(self) -> Dict[str, Any]:
         """
         Run Hacker News crawler
@@ -429,7 +358,7 @@ class CrawlerOrchestrator:
         }
 
         try:
-            crawler = HackerNewsCrawler()
+            crawler = HackerNewsCrawler(known_url_filter=self._known_article_urls)
             articles = await crawler.crawl()
             saved = await self._process_and_save_articles(articles)
 
@@ -451,11 +380,12 @@ class CrawlerOrchestrator:
         Process raw articles through the pipeline and save to database
 
         Pipeline:
-        1. Deduplicate
-        2. Filter out articles with insufficient content
-        3. Summarize (Korean) and Categorize (LLM does both)
-        4. Calculate score
-        5. Save to database
+        1. Deduplicate (URL)
+        2. Content gate — drop empty / blocked / too-short bodies (no LLM call)
+        3. Per article: LLM triage (is it a real article, developer-relevant,
+           category, tags, Korean title) → Korean translation → validation
+        4. Score and save each article as soon as its summary is ready, so a
+           Lambda timeout loses only in-flight articles
 
         Args:
             articles: List of RawArticles to process
@@ -479,120 +409,37 @@ class CrawlerOrchestrator:
             if not unique_articles:
                 return 0
 
-            # Step 2: Filter out articles with insufficient content
+            # Step 2: Content gate. Translating an empty or junk body is how the
+            # LLM ended up inventing articles, so these never reach it.
             articles_to_summarize = []
-            short_content_articles = []
+            gate_rejects: Counter = Counter()
             for article in unique_articles:
-                if len(article.content or "") >= MIN_CONTENT_LENGTH:
+                check = assess_content(article.content or "", settings.MIN_ARTICLE_CONTENT_CHARS)
+                if check.ok:
                     articles_to_summarize.append(article)
                 else:
-                    short_content_articles.append(article)
+                    gate_rejects[check.reason.split(":")[0]] += 1
+                    logger.info(f"Content gate rejected ({check.reason}): {article.url}")
 
-            if short_content_articles:
-                logger.info(
-                    f"Dropped {len(short_content_articles)} articles with content "
-                    f"< {MIN_CONTENT_LENGTH} chars"
-                )
-
+            logger.info(
+                f"Content gate: {len(articles_to_summarize)}/{len(unique_articles)} passed, "
+                f"rejected={dict(gate_rejects)}"
+            )
             if not articles_to_summarize:
                 return 0
 
-            # Step 3: Summarize and Categorize (Korean) - LLM does both now
-            # Efficient batching: 2 articles per LLM request, 5 seconds between requests (defaults)
-            summaries = await self.summarizer.summarize_batch(articles_to_summarize, batch_size=3)
-            logger.info("Summarization and categorization completed")
-
-            # Step 4: Filter out failed summarizations, non-technical articles, and calculate scores
-            scored_articles = []
-            failed_count = 0
-            non_technical_count = 0
-            for article, summary in zip(articles_to_summarize, summaries):
-                if summary is None:
-                    failed_count += 1
-                    logger.warning(f"Skipping article due to failed summarization: {article.title_en}")
-                    continue
-
-                # Skip non-developer-relevant articles (politics, consumer news, etc.)
-                if not summary.get("is_technical", False):
-                    non_technical_count += 1
-                    logger.info(f"Skipping non-developer-relevant article: {article.title_en}")
-                    continue
-
-                # Get category from LLM response
-                category = self._normalize_category(summary.get("category", "OTHER"))
-                score = self.scorer.calculate_score(article)
-                scored_articles.append((article, category, summary, score))
-
-            logger.info(f"Scoring completed. {failed_count} failed summarizations, {non_technical_count} non-developer-relevant articles skipped")
-
-            # Step 5: Save to database
+            # Steps 3–4: summarize concurrently, save each result immediately
             saved_count = 0
-            for article, category, summary, score in scored_articles:
-                try:
-                    # Determine item type
-                    if article.source == "github":
-                        item_type = ItemType.REPO
-                    elif article.source == "reddit" or article.raw_data.get("hn_id"):
-                        item_type = ItemType.DISCUSSION
-                    else:
-                        item_type = ItemType.BLOG
-
-                    # Prefer tags from LLM; fallback to article tags
-                    tags = summary.get("tags") if summary else None
-                    tags = tags if tags else article.tags
-
-                    # Always generate a fresh UUID for external_id (matches Java backend behavior)
-                    # Equivalent to Java's UUID.randomUUID().toString()
-                    external_id = str(uuid.uuid4())
-
-                    # Create Article model
-                    db_article = Article(
-                        external_id=external_id,
-                        item_type=item_type,
-                        source=article.source,
-                        category=category,
-                        summary_ko_title=summary.get("title_ko", article.title_en[:100]),
-                        summary_ko_body=summary.get("summary_ko"),
-                        title_en=article.title_en,
-                        url=article.url,
-                        score=score,
-                        # tags=article.tags,  # NOTE: Tags stored in separate table
-                        stars=article.stars,
-                        comments=article.comments,
-                        upvotes=article.upvotes,
-                        read_time=article.read_time,
-                        language=article.language,
-                        created_at_source=article.published_at,
-                        created_at=datetime.utcnow(),
-                        updated_at=datetime.utcnow()
-                    )
-
-                    # Use a savepoint so a single article failure (e.g. UniqueViolation) does
-                    # not roll back the entire transaction for the remaining articles.
-                    with db.begin_nested():
-                        db.add(db_article)
-                        db.flush()  # Flush to get the article ID
-
-                        # Save tags to article_tags table if article has tags
-                        if tags:
-                            for tag in tags:
-                                tag_entry = ArticleTag(
-                                    article_id=db_article.id,
-                                    tag=tag
-                                )
-                                db.merge(tag_entry)  # Use merge to avoid identity map conflicts
-
+            outcomes: Counter = Counter()
+            async for article, result in self.summarizer.iter_summaries(articles_to_summarize):
+                outcomes[result.status] += 1
+                if result.status != "ok":
+                    logger.info(f"Not saved ({result.status}: {result.reason}): {article.url}")
+                    continue
+                if self._save_article(db, article, result):
                     saved_count += 1
 
-                except Exception as e:
-                    logger.error(f"Failed to save article: {e}")
-                    # Savepoint automatically rolled back; outer transaction remains intact
-                    continue
-
-            # Commit all successfully saved articles and their tags
-            db.commit()
-            logger.info(f"Saved {saved_count} articles to database")
-
+            logger.info(f"Summaries: {dict(outcomes)}. Saved {saved_count} articles to database")
             return saved_count
 
         except Exception as e:
@@ -600,6 +447,63 @@ class CrawlerOrchestrator:
             db.rollback()
             return 0
 
+        finally:
+            db.close()
+
+    def _save_article(self, db: Session, article: RawArticle, summary: SummaryResult) -> bool:
+        """Insert one article and its tags in its own transaction."""
+        if article.source == "github":
+            item_type = ItemType.REPO
+        elif article.raw_data.get("hn_id"):
+            item_type = ItemType.DISCUSSION
+        else:
+            item_type = ItemType.BLOG
+
+        # Prefer tags from LLM; fallback to article tags
+        tags = summary.tags or article.tags
+        now = datetime.utcnow()
+
+        try:
+            db_article = Article(
+                # Always a fresh UUID (matches Java backend's UUID.randomUUID())
+                external_id=str(uuid.uuid4()),
+                item_type=item_type,
+                source=article.source,
+                category=self._normalize_category(summary.category),
+                summary_ko_title=summary.title_ko or article.title_en[:100],
+                summary_ko_body=summary.summary_ko,
+                title_en=article.title_en,
+                url=article.url,
+                score=self.scorer.calculate_score(article),
+                stars=article.stars,
+                comments=article.comments,
+                upvotes=article.upvotes,
+                read_time=article.read_time,
+                language=article.language,
+                created_at_source=article.published_at,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(db_article)
+            db.flush()  # Flush to get the article ID
+            for tag in tags or []:
+                db.merge(ArticleTag(article_id=db_article.id, tag=tag))
+            db.commit()
+            return True
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to save article {article.url}: {e}")
+            return False
+
+    @staticmethod
+    def _known_article_urls(urls: List[str]) -> set:
+        """Subset of ``urls`` already stored in the articles table."""
+        if not urls:
+            return set()
+        db = SessionLocal()
+        try:
+            rows = db.query(Article.url).filter(Article.url.in_(set(urls))).all()
+            return {row[0] for row in rows}
         finally:
             db.close()
 
@@ -611,9 +515,6 @@ class CrawlerOrchestrator:
             if raw.get("hn_id"):
                 source_name = "HackerNews"
                 discussion_url = raw.get("hn_discussion_url")
-            elif raw.get("permalink"):
-                source_name = "Reddit"
-                discussion_url = f"https://www.reddit.com{raw['permalink']}"
             else:
                 source_name = article.source.capitalize()
                 discussion_url = None
@@ -669,21 +570,26 @@ class CrawlerOrchestrator:
                 f"Snapshot diff: new={len(new_repos)}, existing={len(existing_pairs)}"
             )
 
-            # Summarize only new URLs (costly LLM call)
-            summaries = await self.summarizer.summarize_batch(new_repos) if new_repos else []
+            # Summarize only new URLs (costly LLM call), grounded in each README
+            results: Dict[str, SummaryResult] = {}
+            if new_repos:
+                await GitHubCrawler().attach_readmes(new_repos)
+                async for repo, result in self.summarizer.iter_summaries(new_repos, kind="repo"):
+                    results[repo.url] = result
 
             inserted = 0
             failed_summary = 0
             non_technical = 0
-            for repo, summary in zip(new_repos, summaries):
-                if summary is None:
-                    failed_summary += 1
-                    continue
-                if not summary.get("is_technical", False):
-                    non_technical += 1
+            for repo in new_repos:
+                summary = results.get(repo.url)
+                if summary is None or summary.status != "ok":
+                    if summary is not None and summary.status == "non_technical":
+                        non_technical += 1
+                    else:
+                        failed_summary += 1
                     continue
 
-                category = self._normalize_category(summary.get("category", "OTHER"))
+                category = self._normalize_category(summary.category)
                 score = self.scorer.calculate_score(repo)
 
                 db.add(GitRepo(
@@ -694,8 +600,8 @@ class CrawlerOrchestrator:
                     stars=repo.stars or 0,
                     forks=repo.raw_data.get("forks", 0),
                     stars_this_week=repo.raw_data.get("stars_this_week", 0),
-                    summary_ko_title=summary.get("title_ko", repo.title_en[:100]),
-                    summary_ko_body=summary.get("summary_ko"),
+                    summary_ko_title=summary.title_ko or repo.title_en[:100],
+                    summary_ko_body=summary.summary_ko,
                     category=category,
                     score=score,
                     created_at=datetime.utcnow(),

@@ -15,9 +15,18 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql://user:password@localhost:5432/devportdb"
 
-    # LLM API for summarization (OpenAI gpt-5-nano)
+    # LLM API for summarization (OpenAI)
     OPENAI_API_KEY: Optional[str] = None
-    LLM_MAX_TOKENS: int = 8000  # Max completion tokens (output) per request
+    # gpt-5-nano shuts down 2026-12-11. gpt-6-luna is the same price tier
+    # ($0.10/$0.50 per 1M tokens) one generation newer. For higher translation
+    # quality set LLM_MODEL=gpt-6.1-sol (~20x output cost).
+    LLM_MODEL: str = "gpt-6-luna"  # Korean translation (long-form markdown)
+    LLM_TRIAGE_MODEL: str = "gpt-6-luna"  # Classification / content check / title (JSON)
+    LLM_REASONING_EFFORT: str = "low"
+    LLM_TRIAGE_REASONING_EFFORT: str = "low"
+    LLM_MAX_TOKENS: int = 32000  # Upper bound on completion tokens for one translation
+    LLM_TIMEOUT_SECONDS: float = 300.0
+    LLM_SDK_MAX_RETRIES: int = 4  # SDK-level retries for 429/5xx/connection errors
 
     # GitHub API
     GITHUB_TOKEN: Optional[str] = None
@@ -86,8 +95,6 @@ class Settings(BaseSettings):
 
     # Filtering
     MIN_REACTIONS_DEVTO: int = 10
-    MIN_REACTIONS_HASHNODE: int = 5
-    MIN_UPVOTES_REDDIT: int = 100
     MIN_SCORE_HACKERNEWS: int = 50
     MIN_STARS_GITHUB: int = 50
 
@@ -96,13 +103,18 @@ class Settings(BaseSettings):
     MAX_AGE_DAYS_HACKERNEWS: int = 7  # Skip stories older than this
 
     # Concurrency controls
-    LLM_CONCURRENCY: int = 5  # Max concurrent LLM API calls
-    LLM_BATCH_DELAY: float = 1.0  # Stagger delay between concurrent LLM batches (seconds)
+    LLM_CONCURRENCY: int = 6  # Max articles summarized concurrently (one article per LLM call)
     CONTENT_FETCH_CONCURRENCY: int = 20  # Max concurrent httpx content fetches
 
-    # Playwright (JS-rendered content fetching for HN & Reddit)
+    # Article content quality gates (applied to the cleaned markdown body)
+    MIN_ARTICLE_CONTENT_CHARS: int = 2000  # Below this the article is not worth translating
+    MAX_ARTICLE_CONTENT_CHARS: int = 50000  # Longer bodies are cut at a paragraph boundary
+    MAX_README_CHARS: int = 20000
+
+    # Playwright (JS-rendered fallback when fetching Hacker News links)
     PLAYWRIGHT_HEADLESS: bool = True
     PLAYWRIGHT_TIMEOUT_MS: int = 15000  # Page load timeout
+    PLAYWRIGHT_SETTLE_MS: int = 6000  # Max wait for client-rendered text to stop growing
     PLAYWRIGHT_USER_AGENT: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -111,21 +123,11 @@ class Settings(BaseSettings):
     # Sequential page opens — required when using --single-process Chromium.
     # Multi-target CDP requests under single-process race and fail.
     PLAYWRIGHT_CONCURRENCY: int = 1
-    MIN_CONTENT_FOR_PLAYWRIGHT: int = 3000  # Below this char count, try Playwright fallback
-
-    # Reddit API (optional OAuth; falls back to public if missing)
-    REDDIT_CLIENT_ID: Optional[str] = None
-    REDDIT_CLIENT_SECRET: Optional[str] = None
 
     # Crawler HTTP retry policy
     CRAWLER_HTTP_MAX_RETRIES: int = 3
     CRAWLER_HTTP_BACKOFF_BASE_SECONDS: float = 1.0
     CRAWLER_HTTP_BACKOFF_MAX_SECONDS: float = 10.0
-
-    # LLM summarizer retry policy
-    LLM_RETRY_MAX_ATTEMPTS: int = 3
-    LLM_RETRY_BACKOFF_BASE_SECONDS: float = 5.0
-    LLM_RETRY_BACKOFF_MAX_SECONDS: float = 30.0
 
     # Discord webhook for failed content fetch notifications
     DISCORD_WEBHOOK_URL: Optional[str] = None
