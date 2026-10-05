@@ -45,7 +45,7 @@ devport.kr 크롤링 서비스
 - 일반 HTTP 요청 + 본문 추출(trafilatura, readability, `<article>` 컨테이너 중 실제 문장이 가장 많이 남는 결과)
 - 결과가 부실하면(SPA 껍데기, 봇 차단, 너무 짧음) 그 페이지만 Playwright로 렌더링
 - GitHub 저장소 링크는 GitHub API로 README 원문을 가져옴, 영상/SNS/PDF 링크는 건너뜀
-- 코드 블록·제목·목록·표 구조를 유지한 Markdown, 이미지·임베드·보이지 않는 문자 제거
+- 코드 블록·제목·목록·표 구조를 유지한 Markdown, 이미지·임베드·보이지 않는 문자 제거 (GitHub 트렌딩 README는 이미지 유지, 아래 참고)
 
 **LLM** (`app/services/summarizer.py`)
 - 기사 1개당 요청 1개 (배치 없음): ① JSON 판정 호출 → ② Markdown 번역 호출
@@ -53,6 +53,9 @@ devport.kr 크롤링 서비스
 - 번역은 요약이 아닌 충실한 번역 — 원문에 없는 내용 추가 금지, 코드 원문 유지, 합니다체 통일
 - 출력 검증: 한국어 비율, 원문 대비 길이(부풀림 감지), 잘림(`finish_reason=length`) 시 재시도, 실패 시 저장 안 함
 - GitHub 트렌딩은 README를 근거로 소개글 작성
+  - README의 스크린샷·데모 GIF·다이어그램은 `![설명](URL)`로 소개글에 포함 — 상대 경로·`blob` 링크는 `raw.githubusercontent.com` 절대 URL로 바꿔 devport.kr에서도 그대로 표시됨
+  - 배지·후원/커뮤니티 버튼·기여자 이미지·스타 차트는 제외, `<picture>`는 다크 모드 이미지 우선
+  - 출력에서 README에 없는 이미지 URL은 제거 (지어낸 링크 방지)
 
 ## 빠른 시작
 

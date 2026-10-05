@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Callable, List, Dict, Any, Optional
 from datetime import datetime
 import asyncio
+import base64
 import logging
 import httpx
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential
@@ -15,6 +16,7 @@ from app.crawlers.content import (
     assess_content,
     extract_main_content,
     normalize_markdown,
+    normalize_readme_markdown,
     parse_github_url,
     prose_chars,
     unsupported_reason,
@@ -466,10 +468,17 @@ class BaseCrawler(ABC):
         return markdown, f"httpx:{extractor}", response.status_code, content_type
 
     @staticmethod
-    async def fetch_github_markdown(client: httpx.AsyncClient, ref: GitHubRef) -> str:
-        """Raw README (or linked markdown file) via the GitHub API — far cleaner than the HTML page."""
+    async def fetch_github_markdown(
+        client: httpx.AsyncClient, ref: GitHubRef, *, keep_images: bool = False
+    ) -> str:
+        """Raw README (or linked markdown file) via the GitHub API — far cleaner than the HTML page.
+
+        ``keep_images`` keeps the README's images with absolute URLs (repo
+        write-ups). That needs the JSON response: its ``download_url`` is what
+        relative image paths resolve against.
+        """
         headers = {
-            "Accept": "application/vnd.github.raw+json",
+            "Accept": "application/vnd.github+json" if keep_images else "application/vnd.github.raw+json",
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": settings.USER_AGENT,
         }
@@ -483,6 +492,7 @@ class BaseCrawler(ABC):
                 headers=headers,
                 params={"ref": ref.ref} if ref.ref else None,
                 timeout=15.0,
+                follow_redirects=True,  # renamed/transferred repos answer 301
             )
         except Exception as e:
             logger.debug(f"GitHub API fetch failed for {endpoint}: {e}")
@@ -490,7 +500,15 @@ class BaseCrawler(ABC):
         if response.status_code != 200:
             logger.debug(f"GitHub API {response.status_code} for {endpoint}")
             return ""
-        return normalize_markdown(response.text)
+        if not keep_images:
+            return normalize_markdown(response.text)
+        try:
+            data = response.json()
+            text = base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+        except (ValueError, KeyError, TypeError) as e:
+            logger.debug(f"Unexpected GitHub API payload for {endpoint}: {e}")
+            return ""
+        return normalize_readme_markdown(text, data.get("download_url") or "", data.get("path") or "")
 
     async def fetch_rendered_html(self, browser, url: str, timeout_ms: int = 30000) -> str:
         """Render a URL with Playwright (JS executed) and return the resulting HTML.

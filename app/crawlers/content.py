@@ -13,12 +13,13 @@ structure, which is where broken translations and invented code came from.
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 import warnings
 from dataclasses import dataclass
 from typing import Callable, Optional
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 import trafilatura
 from bs4 import BeautifulSoup
@@ -48,7 +49,8 @@ _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
 # thousands of these (watermarking); they only burn tokens and confuse models.
 _INVISIBLE_RE = re.compile(r"[­᠎​-‏‪-‮⁠-⁤⁦-⁯﻿￹-￻]")
 _MD_IMAGE_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
-_EMPTY_LINK_RE = re.compile(r"\[\s*\]\([^)]*\)")
+# The lookbehind keeps "![](url)" — kept images with an empty alt — intact
+_EMPTY_LINK_RE = re.compile(r"(?<!!)\[\s*\]\([^)]*\)")
 _HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 _HTML_HEADING_RE = re.compile(r"<h([1-6])[^>]*>(.*?)</h\1\s*>", re.S | re.I)
 _HTML_BLOCK_DROP_RE = re.compile(r"<(picture|video|audio|iframe|svg|script|style)\b.*?</\1\s*>", re.S | re.I)
@@ -108,7 +110,7 @@ def _map_prose(md: str, fn: Callable[[str], str]) -> str:
     return "".join(out)
 
 
-def _strip_html_and_media(text: str) -> str:
+def _strip_html_and_media(text: str, keep_images: bool = False) -> str:
     text = _HTML_COMMENT_RE.sub("", text)
     text = _HTML_BLOCK_DROP_RE.sub("", text)
     text = _HTML_HEADING_RE.sub(
@@ -116,7 +118,8 @@ def _strip_html_and_media(text: str) -> str:
     )
     text = _HTML_BR_RE.sub("\n", text)
     text = _HTML_TAG_RE.sub("", text)
-    text = _MD_IMAGE_RE.sub("", text)
+    if not keep_images:
+        text = _MD_IMAGE_RE.sub("", text)
     text = _EMPTY_LINK_RE.sub("", text)
     return text
 
@@ -140,13 +143,17 @@ def _drop_ui_lines(text: str) -> str:
     return "\n\n".join(kept)
 
 
-def normalize_markdown(md: str) -> str:
-    """Normalize extracted/source markdown into the shape the LLM receives."""
+def normalize_markdown(md: str, *, keep_images: bool = False) -> str:
+    """Normalize extracted/source markdown into the shape the LLM receives.
+
+    Images are dropped unless ``keep_images`` (README write-ups, which convert
+    HTML images to Markdown beforehand — other HTML tags are still stripped).
+    """
     if not md:
         return ""
     md = md.replace("\r\n", "\n").replace("\r", "\n").replace(" ", " ")
     md = _INVISIBLE_RE.sub("", md)
-    md = _map_prose(md, _strip_html_and_media)
+    md = _map_prose(md, lambda text: _strip_html_and_media(text, keep_images))
     md = _map_prose(md, _drop_ui_lines)
     md = re.sub(r"[ \t]+\n", "\n", md)
     md = re.sub(r"\n{3,}", "\n\n", md)
@@ -171,6 +178,152 @@ def clean_devto_markdown(md: str) -> str:
         return _LIQUID_EMBED_RE.sub("", text)
 
     return normalize_markdown(_map_prose(md, _liquid))
+
+
+# --------------------------------------------------------------------------- #
+# GitHub README images
+# --------------------------------------------------------------------------- #
+# Repository write-ups keep the README's screenshots, demos and diagrams. Image
+# links are made absolute raw.githubusercontent.com URLs: relative paths and
+# github.com/<owner>/<repo>/blob/... pages only resolve on github.com, while raw
+# files are served with permissive CORS/CORP headers, so devport.kr can embed them.
+
+_MD_IMAGE_PARTS_RE = re.compile(r"""!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+(?:"[^"]*"|'[^']*'))?\s*\)""")
+_HTML_PICTURE_RE = re.compile(r"<picture\b[^>]*>(.*?)</picture\s*>", re.S | re.I)
+_HTML_IMG_RE = re.compile(r"<img\b[^>]*>", re.I)
+_HTML_SOURCE_RE = re.compile(r"<source\b[^>]*>", re.I)
+_HTML_ATTR_RE = re.compile(r"""([a-zA-Z][\w:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))""")
+_GITHUB_FILE_PATH_RE = re.compile(r"^/([^/]+)/([^/]+)/(?:blob|raw)/(.+)$")
+
+# Badges, counters, contributor walls, star charts and generated headers are
+# decoration, not content
+_DECORATION_HOSTS = (
+    "shields.io", "badgen.net", "badge.fury.io", "codecov.io", "coveralls.io", "circleci.com",
+    "travis-ci.org", "travis-ci.com", "api.netlify.com", "readthedocs.org", "pepy.tech", "sonarcloud.io",
+    "contrib.rocks", "star-history.com", "reporoster.com", "capsule-render.vercel.app", "komarev.com",
+    "hits.seeyoufarm.com", "repobeats.axiom.co", "skillicons.dev", "github-readme-stats.vercel.app",
+)
+_DECORATION_PATH_RE = re.compile(r"badge|button|sponsor|devicon", re.I)
+# Community, sponsor and deploy buttons, recognized by their alt text
+_BUTTON_ALT_RE = re.compile(
+    r"\b(discord|slack|telegram|twitter|wechat|follow us|sponsor|donate|buy me a coffee|ko-?fi|patreon"
+    r"|visit|open in|deploy (?:to|with|on))\b",
+    re.I,
+)
+# Only ";"-terminated references: html.unescape also decodes legacy entities
+# without one, turning "?a=1&section=x" into "?a=1§ion=x"
+_ENTITY_RE = re.compile(r"&(?:#\d+|#x[0-9a-fA-F]+|[a-zA-Z][a-zA-Z0-9]*);")
+# Signed links copied from rendered READMEs expire within minutes
+_EXPIRING_IMAGE_HOSTS = ("private-user-images.githubusercontent.com",)
+
+
+def _unescape_entities(text: str) -> str:
+    return _ENTITY_RE.sub(lambda m: html.unescape(m.group(0)), text)
+
+
+def _html_attrs(tag: str) -> dict[str, str]:
+    return {
+        m.group(1).lower(): _unescape_entities(next(v for v in m.groups()[1:] if v is not None))
+        for m in _HTML_ATTR_RE.finditer(tag)
+    }
+
+
+def _markdown_image(alt: str, src: str) -> str:
+    alt = re.sub(r"[\[\]\s]+", " ", alt).strip()
+    src = src.strip().replace(" ", "%20").replace("(", "%28").replace(")", "%29")
+    return f"![{alt}]({src})" if src else ""
+
+
+def _img_tag_to_markdown(tag: str) -> str:
+    attrs = _html_attrs(tag)
+    return _markdown_image(attrs.get("alt", ""), attrs.get("src", ""))
+
+
+def _picture_to_markdown(match: re.Match) -> str:
+    """<picture> → one Markdown image, preferring the dark-mode source (devport is dark-themed)."""
+    inner = match.group(1)
+    img = _HTML_IMG_RE.search(inner)
+    alt = _html_attrs(img.group(0)).get("alt", "") if img else ""
+    for source in _HTML_SOURCE_RE.findall(inner):
+        attrs = _html_attrs(source)
+        srcset = attrs.get("srcset", "").strip()
+        if "dark" in attrs.get("media", "") and srcset:
+            return _markdown_image(alt, srcset.split(",")[0].split()[0])
+    return _img_tag_to_markdown(img.group(0)) if img else ""
+
+
+def _raw_bases(download_url: str, readme_path: str) -> tuple[str, str]:
+    """(README directory, repository root) as raw URLs, for resolving relative image paths."""
+    if not download_url:
+        return "", ""
+    directory = download_url.rsplit("/", 1)[0] + "/"
+    if readme_path and download_url.endswith(readme_path):
+        return directory, download_url[: -len(readme_path)]
+    return directory, directory
+
+
+def _readme_image_url(src: str, raw_dir: str, raw_root: str) -> Optional[str]:
+    """Absolute, embeddable URL for a README image, or None if the image should be dropped."""
+    url, _, fragment = _unescape_entities(src).strip().partition("#")
+    if not url or fragment == "gh-light-mode-only":
+        return None  # its #gh-dark-mode-only twin is kept instead
+    if url.startswith("//"):
+        url = "https:" + url
+    elif url.startswith("/"):  # repository-root relative on GitHub
+        url = urljoin(raw_root, url.lstrip("/")) if raw_root else ""
+    elif not urlparse(url).scheme:
+        url = urljoin(raw_dir, url) if raw_dir else ""
+
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    if parsed.scheme not in ("http", "https") or host in _EXPIRING_IMAGE_HOSTS:
+        return None
+    if any(host == h or host.endswith("." + h) for h in _DECORATION_HOSTS) or _DECORATION_PATH_RE.search(parsed.path):
+        return None
+    if host == "github.com":
+        file_match = _GITHUB_FILE_PATH_RE.match(parsed.path)
+        if file_match:  # blob/raw page → the file itself
+            owner, repo, rest = file_match.groups()
+            return f"https://raw.githubusercontent.com/{owner}/{repo}/{rest}"
+    return url
+
+
+def _rewrite_readme_image(match: re.Match, raw_dir: str, raw_root: str) -> str:
+    alt, src = match.group(1), match.group(2)
+    if _BUTTON_ALT_RE.search(alt):
+        return ""
+    url = _readme_image_url(src, raw_dir, raw_root)
+    return _markdown_image(alt, url) if url else ""
+
+
+def normalize_readme_markdown(md: str, download_url: str = "", readme_path: str = "") -> str:
+    """README → the Markdown the repo write-up model receives, images included.
+
+    HTML <picture>/<img> become Markdown images, every image URL is made
+    absolute against the README's raw URL (``download_url`` from the GitHub
+    contents API), and badges, community buttons and light-mode twins are dropped.
+    """
+    raw_dir, raw_root = _raw_bases(download_url, readme_path)
+
+    def _images(text: str) -> str:
+        text = _HTML_COMMENT_RE.sub("", text)  # commented-out images must stay out
+        text = _HTML_PICTURE_RE.sub(_picture_to_markdown, text)
+        text = _HTML_IMG_RE.sub(lambda m: _img_tag_to_markdown(m.group(0)), text)
+        return _MD_IMAGE_PARTS_RE.sub(lambda m: _rewrite_readme_image(m, raw_dir, raw_root), text)
+
+    return normalize_markdown(_map_prose(md or "", _images), keep_images=True)
+
+
+def drop_unknown_images(text: str, source_md: str) -> str:
+    """Keep only Markdown images whose URL appears in ``source_md``; invented or altered links go."""
+    allowed = {m.group(2) for m in _MD_IMAGE_PARTS_RE.finditer(source_md or "")}
+
+    def _filter(prose: str) -> str:
+        prose = _HTML_IMG_RE.sub("", prose)
+        prose = _MD_IMAGE_PARTS_RE.sub(lambda m: m.group(0) if m.group(2) in allowed else "", prose)
+        return _EMPTY_LINK_RE.sub("", prose)
+
+    return re.sub(r"\n{3,}", "\n\n", _map_prose(text or "", _filter)).strip()
 
 
 # --------------------------------------------------------------------------- #

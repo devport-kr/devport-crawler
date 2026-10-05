@@ -27,7 +27,7 @@ from openai import AsyncOpenAI
 
 from app.config.settings import settings
 from app.crawlers.base import RawArticle
-from app.crawlers.content import truncate_markdown
+from app.crawlers.content import drop_unknown_images, truncate_markdown
 from app.utils import deadline
 
 logger = logging.getLogger(__name__)
@@ -119,6 +119,13 @@ REPO_SYSTEM = f"""당신은 한국 개발자 커뮤니티 devport.kr에서 GitHu
 3. '## 시작하기': 설치·실행 방법이 있으면 핵심 명령어만 코드 블록으로 (원문 그대로)
 4. 그 밖에 README가 비중 있게 다루는 내용(아키텍처, 지원 환경, 프로젝트 상태 등)은 필요할 때만 짧게
 README에 없는 섹션은 만들지 않습니다.
+
+## 이미지
+- <readme>의 이미지 중 프로젝트를 이해하는 데 도움이 되는 것(대표 배너, 스크린샷, 데모 GIF, 아키텍처·흐름 다이어그램)은 소개글의 알맞은 위치에 Markdown 이미지 `![설명](URL)`로 넣습니다. 대표 배너나 데모는 첫 단락 바로 아래가 자연스럽습니다.
+- URL은 <readme>에 적힌 그대로 한 글자도 바꾸지 않고 씁니다. <readme>에 없는 이미지를 넣거나 URL을 고치지 않습니다.
+- 설명(대체 텍스트)은 이미지 내용을 한국어로 짧게 씁니다.
+- 같은 이미지를 두 번 넣지 않고, 작은 로고나 버튼처럼 내용이 없는 이미지는 넣지 않습니다. 이미지는 많아야 4개까지 고릅니다.
+- HTML `<img>` 태그는 쓰지 않습니다.
 
 {_STYLE_GUIDE}"""
 
@@ -407,6 +414,8 @@ class SummarizerService:
         )
         if not summary_ko:
             return SummaryResult("failed", reason="write_failed")
+        # Only images the README actually has, with their exact (already absolute) URLs
+        summary_ko = drop_unknown_images(summary_ko, readme)
 
         return SummaryResult(
             "ok",
