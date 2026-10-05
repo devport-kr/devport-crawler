@@ -109,7 +109,8 @@ class GitHubCrawler(BaseCrawler):
         """Fetch each repo's README (GitHub API) into raw_data["readme"].
 
         The trending page only has a one-line description; summarizing from
-        that alone made the LLM invent the rest of the write-up.
+        that alone made the LLM invent the rest of the write-up. Images stay in,
+        with absolute URLs, so the write-up can show the README's screenshots.
         """
         sem = asyncio.Semaphore(5)
 
@@ -120,7 +121,7 @@ class GitHubCrawler(BaseCrawler):
                     return
                 async with sem:
                     repo.raw_data["readme"] = await self.fetch_github_markdown(
-                        client, GitHubRef(owner, name)
+                        client, GitHubRef(owner, name), keep_images=True
                     )
 
             await asyncio.gather(*(fetch(r) for r in repos), return_exceptions=True)
